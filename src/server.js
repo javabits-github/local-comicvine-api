@@ -492,9 +492,20 @@ function resolveLimit(requested, defaultLimit, maxLimit) {
   return Math.min(Math.max(Math.floor(limit), 1), maxLimit);
 }
 
+// Default logger: one line per entry, prefixed with a readable timestamp and
+// level, written to the stream matching its level. Custom loggers (e.g. tests)
+// receive the stamped entry directly and ignore this formatting.
+function defaultLogger(entry) {
+  const prefix = `[${entry.timestamp ?? new Date().toISOString()}] [${(entry.level ?? "info").toUpperCase()}] `;
+  const line = `${prefix}${JSON.stringify(entry)}`;
+  if (entry.level === "error") console.error(line);
+  else if (entry.level === "warn") console.warn(line);
+  else console.info(line);
+}
+
 function createApiServer(
   databasePath = path.join(__dirname, "..", "localcv.db"),
-  logger = (entry) => console.info(JSON.stringify(entry)),
+  logger = defaultLogger,
   options = {}
 ) {
   const database = new DatabaseSync(databasePath, { readOnly: true });
@@ -523,7 +534,20 @@ function createApiServer(
    // In-memory per-endpoint request stats for /api/status; resets on restart.
    const requestStats = new Map();
 
-  const server = createServer(async (request, response) => {
+   // SRV-10: log levels, ordered from least to most severe. Entries at or below
+   // the configured threshold are emitted; anything above is dropped.
+   const logLevels = { debug: 10, info: 20, warn: 30, error: 40 };
+   const logThreshold = logLevels[String(options.logLevel ?? process.env.COMICVINE_LOG_LEVEL ?? "info").toLowerCase()] ?? logLevels.info;
+   // Central log sink: stamps an ISO-8601 timestamp and a level (defaulting to
+   // "info") on every entry, then applies the level threshold before delegating
+   // to the configured logger.
+   const log = (level, entry) => {
+     const record = { ...entry, level, timestamp: new Date().toISOString() };
+     if ((logLevels[level] ?? logLevels.info) < logThreshold) return;
+     logger(record);
+   };
+
+   const server = createServer(async (request, response) => {
     const startedAt = Date.now();
     const requestUrl = new URL(request.url, "http://localhost");
     const requestPath = requestUrl.pathname;
@@ -542,7 +566,7 @@ function createApiServer(
       entry.status_codes[status] = (entry.status_codes[status] ?? 0) + 1;
       entry.duration_sum_ms += durationMs();
       requestStats.set(key, entry);
-      logger({
+      log("info", {
         method: request.method,
         path: requestPath,
         query: requestUrl.searchParams.toString(),
@@ -725,7 +749,10 @@ function createApiServer(
       if (validateEnabled && validateApiKey) {
         const compareCollections = resource.singular === "issue";
         const validation = await validateEntity(resource.singular, id, normalized, validateApiKey, compareCollections, validateFetchFn);
-        logger({
+        // A clean match is a routine info line; a mismatch or a live entity that
+        // could not be fetched is a warning worth surfacing.
+        const level = validation.status === "match" ? "info" : "warn";
+        log(level, {
           type: "validation",
           method: request.method,
           path: requestPath,
@@ -797,7 +824,7 @@ if (require.main === module) {
   if (process.env.COMICVINE_VALIDATE) options.validate = true;
   const server = createApiServer(databasePath, undefined, options);
   server.listen(port, host, () => {
-    console.log(`ComicVine API local listening at http://${host}:${port}`);
+    defaultLogger({ type: "startup", level: "info", message: `listening at http://${host}:${port}`, timestamp: new Date().toISOString() });
   });
 }
 

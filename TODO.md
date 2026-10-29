@@ -13,6 +13,7 @@ Open items and known gaps for the ComicVine local API.
 - [ ] **SRV-7 — Log to file.** Currently each request is logged to stdout as JSON. Add optional file logging (e.g. `COMICVINE_LOG_FILE`) with rotation, keeping stdout logging available.
 - [x] **SRV-8 — Validation mode against the live API.** Done: `COMICVINE_VALIDATE=1` (or `validate: true`) has detail responses diff the entity against the live API and report a `validation` field; the live key comes from `COMICVINE_API_KEY`.
 - [x] **SRV-9 — Add a status page with statistics.** Done: `/api/status` reports per-table row counts, `cv_sync_metadata` last-sync dates, and per-endpoint API call statistics (request counts, status codes, average duration).
+- [x] **SRV-10 — Add log levels and timestamps.** Done: every log entry carries an ISO-8601 `timestamp` and a `level`; `COMICVINE_LOG_LEVEL`/`logLevel` sets a threshold, and the default logger routes `warn`/`error` to stderr.
 
 ## Updater (`sqlite_cv_updater/sqlite_cv_updater.py`)
 
@@ -23,6 +24,10 @@ Open items and known gaps for the ComicVine local API.
 ## Database
 
 - [ ] **DB-1 — Multiple dated snapshots accumulate in the project root.** `localcv-2026-10-27.db`, `localcv-2026-10-28.db`, `localcv-2026-10-29.db` (plus `-wal`/`-shm`) sit alongside `localcv.db`. Confirm the rotation/backup policy and whether these belong in `.gitignore`.
+
+## Deployment
+
+- [ ] **DEPLOY-1 — Add a Dockerfile.** The server is zero-dependency Node.js, so it can run on a slim `node:22` image; the updater is Python. Decide whether to ship a single multi-stage image (server + updater) or separate images, and how the large `localcv.db` gets in (build-arg, mounted volume, or a separate data image) since it is gitignored.
 
 ## Docs
 

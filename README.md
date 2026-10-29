@@ -18,7 +18,7 @@ npm start
 
 Paging limits follow ComicVine's defaults: list endpoints default to 100 and the search endpoint defaults to 10, with a maximum page size of 100. A requested `limit` is clamped to the maximum. Three environment variables override these controls: `COMICVINE_MAX_LIMIT` raises the maximum page size, `COMICVINE_DEFAULT_LIMIT` overrides the default for list endpoints, and `COMICVINE_SEARCH_DEFAULT_LIMIT` overrides the default for the search endpoint. When unset, each falls back to the values above. When `COMICVINE_FORCED_LIMIT` is set, that page size is applied to the **search endpoint only** and takes precedence over a client's `?limit=` (still clamped to the maximum); it does not affect list or detail endpoints. The same controls are available as the `maxLimit`, `defaultLimit`, `searchDefaultLimit`, and `searchForcedLimit` options of `createApiServer`.
 
-Each completed request is logged to stdout as JSON with its method, path, query, status, and duration. Credential-like query parameters such as `api_key` are redacted. When validation mode is on, each diffed detail request also logs a `type: "validation"` entry with the resource, id, validation status, and any diffs.
+Each completed request is logged to stdout as JSON with its method, path, query, status, and duration, plus a `level` and an ISO-8601 `timestamp`. Credential-like query parameters such as `api_key` are redacted. When validation mode is on, each diffed detail request also logs a `type: "validation"` entry with the resource, id, validation status, and any diffs. Every entry carries a `level` (`debug`/`info`/`warn`/`error`) and a `timestamp`, and the default logger prefixes each line with a readable `[timestamp] [LEVEL]` before the JSON body, writing `warn`/`error` entries to stderr and everything else to stdout. `COMICVINE_LOG_LEVEL` (or the `logLevel` option) sets a minimum threshold; entries below it are dropped — for example `COMICVINE_LOG_LEVEL=warn` suppresses the routine request logs and keeps only warnings and errors.
 
 ### Validation mode (live API)
 
@@ -78,6 +78,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-10-29 — Log levels and timestamps (SRV-10)
+
+- **Context:** the JSON request/validation logs had no severity and no wall-clock time, so a busy log stream was hard to filter or correlate.
+- **Change:** added a `log()` helper in `createApiServer` that stamps every entry with an ISO-8601 `timestamp` and a `level` (request logs are `info`; validation logs are `info` on a match, `warn` on a mismatch/missing/unavailable). `COMICVINE_LOG_LEVEL` (or the `logLevel` option) sets a minimum threshold that drops quieter entries, and the default logger now writes `warn`/`error` to stderr and the rest to stdout.
+- **Gotcha / follow-up:** the level is resolved once at server construction, so a running server needs a restart to change `COMICVINE_LOG_LEVEL`.
 
 #### 2026-10-29 — Live-API validation on detail endpoints (SRV-8)
 

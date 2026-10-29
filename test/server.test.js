@@ -428,6 +428,54 @@ test("logs query parameters while redacting credentials", async () => {
   assert(!JSON.stringify(logEntry).includes("private-value"));
 });
 
+test("stamps log entries with a level and ISO-8601 timestamp", async () => {
+  const entries = [];
+  const levelServer = createApiServer(databasePath, (entry) => entries.push(entry));
+  await new Promise((resolve) => levelServer.listen(0, "127.0.0.1", resolve));
+  const levelUrl = `http://127.0.0.1:${levelServer.address().port}`;
+
+  try {
+    await fetch(`${levelUrl}/api/people`);
+    const entry = entries.at(-1);
+    assert.equal(entry.level, "info");
+    assert.ok(typeof entry.timestamp, "string");
+    assert.equal(new Date(entry.timestamp).toISOString(), entry.timestamp);
+  } finally {
+    await new Promise((resolve) => levelServer.close(resolve));
+  }
+});
+
+test("drops log entries below the configured level threshold", async () => {
+  // At a "warn" threshold, the routine info request log is suppressed, but a
+  // validation mismatch (logged at warn) is emitted.
+  const entries = [];
+  const previousKey = process.env.COMICVINE_API_KEY;
+  process.env.COMICVINE_API_KEY = "test-key";
+  const quietServer = createApiServer(databasePath, (entry) => entries.push(entry), {
+    logLevel: "warn",
+    validate: true,
+    fetchFn: async (singular, id) => ({ id, name: "LIVE " + id })
+  });
+  await new Promise((resolve) => quietServer.listen(0, "127.0.0.1", resolve));
+  const quietUrl = `http://127.0.0.1:${quietServer.address().port}`;
+
+  try {
+    // A plain request logs at info and is dropped by the warn threshold.
+    await fetch(`${quietUrl}/api/volumes`);
+    assert.equal(entries.length, 0);
+
+    // A detail request triggers validation; the mismatch is a warn and is kept.
+    await fetch(`${quietUrl}/api/volume/7300/`);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].level, "warn");
+    assert.equal(entries[0].type, "validation");
+  } finally {
+    await new Promise((resolve) => quietServer.close(resolve));
+    if (previousKey === undefined) delete process.env.COMICVINE_API_KEY;
+    else process.env.COMICVINE_API_KEY = previousKey;
+  }
+});
+
 test("serves normalized localcv tables and reports missing resources cleanly", async () => {
   const localDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-localcv-test-"));
   const localDatabasePath = path.join(localDirectory, "localcv.db");
