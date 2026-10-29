@@ -1,6 +1,8 @@
 const { createServer } = require("node:http");
 const { DatabaseSync } = require("node:sqlite");
 const path = require("node:path");
+const { resourceConfig } = require("./fieldConfig.js");
+const { validateEntity } = require("./validate.js");
 
 // Map API resource names to their database table and collection path.
 const resources = {
@@ -16,59 +18,17 @@ const resources = {
   team: { table: "cv_team", plural: "teams" },
   volume: { table: "cv_volume", plural: "volumes" }
 };
-const volumeFields = new Set([
-  "aliases", "api_detail_url", "count_of_issues", "date_added", "date_last_updated",
-  "character_credits", "concept_credits", "deck", "description", "first_issue", "id",
-  "image", "last_issue", "location_credits", "name", "object_credits", "person_credits",
-  "publisher", "site_detail_url", "start_year", "team_credits"
-]);
-const volumeCreditFields = new Set([
-  "character_credits", "concept_credits", "location_credits", "object_credits",
-  "person_credits", "team_credits"
-]);
-const teamFields = new Set([
-  "aliases", "api_detail_url", "count_of_issue_appearances", "count_of_team_members",
-  "character_enemies", "character_friends", "characters", "date_added", "date_last_updated",
-  "deck", "description", "disbanded_in_issues", "first_appeared_in_issue", "id", "image",
-  "issue_credits", "issues_disbanded_in", "movies", "name", "publisher", "site_detail_url",
-  "story_arc_credits", "volume_credits"
-]);
-const teamRelationshipFields = new Set([
-  "character_enemies", "character_friends", "characters", "disbanded_in_issues",
-  "issue_credits", "issues_disbanded_in", "movies", "story_arc_credits", "volume_credits"
-]);
 const sortableTeamFields = new Set([
   "aliases", "count_of_issue_appearances", "count_of_team_members", "date_added",
   "date_last_updated", "deck", "description", "id", "name", "site_detail_url"
 ]);
-const storyArcFields = new Set([
-  "aliases", "api_detail_url", "count_of_issue_appearances", "date_added",
-  "date_last_updated", "deck", "description", "first_appeared_in_issue", "id", "image",
-  "issues", "movies", "name", "publisher", "site_detail_url"
-]);
-const storyArcRelationshipFields = new Set(["issues", "movies"]);
 const sortableStoryArcFields = new Set([
   "aliases", "count_of_issue_appearances", "date_added", "date_last_updated",
   "deck", "description", "id", "name", "site_detail_url"
 ]);
-const publisherFields = new Set([
-  "aliases", "api_detail_url", "characters", "date_added", "date_last_updated", "deck",
-  "description", "id", "image", "location_address", "location_city", "location_state",
-  "name", "site_detail_url", "story_arcs", "teams", "volumes"
-]);
-const publisherRelationshipFields = new Set(["characters", "story_arcs", "teams", "volumes"]);
 const sortablePublisherFields = new Set([
   "aliases", "date_added", "date_last_updated", "deck", "description", "id", "name",
   "site_detail_url"
-]);
-const personFields = new Set([
-  "aliases", "api_detail_url", "birth", "count_of_issue_appearances", "country",
-  "created_characters", "date_added", "date_last_updated", "death", "deck", "description",
-  "email", "gender", "hometown", "id", "image", "issue_credits", "name",
-  "site_detail_url", "story_arc_credits", "volume_credits", "website"
-]);
-const personRelationshipFields = new Set([
-  "created_characters", "issue_credits", "story_arc_credits", "volume_credits"
 ]);
 const sortablePersonFields = new Set([
   "aliases", "birth", "count_of_issue_appearances", "country", "date_added",
@@ -79,33 +39,8 @@ const sortableVolumeFields = new Set([
   "description", "id", "name", "site_detail_url", "start_year"
 ]);
 
-// image is intentionally absent: normalizeResult strips issue images.
-const issueFields = new Set([
-  "id", "name", "aliases", "api_detail_url", "deck", "description", "issue_number",
-  "cover_date", "store_date", "date_added", "date_last_updated", "has_staff_review",
-  "site_detail_url", "volume", "character_credits", "person_credits", "team_credits",
-  "location_credits", "story_arc_credits", "object_credits", "concept_credits",
-  "associated_images", "character_died_in", "team_disbanded_in",
-  "first_appearance_characters", "first_appearance_concepts", "first_appearance_locations",
-  "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"
-]);
-const issueRelationshipFields = new Set([
-  "character_credits", "person_credits", "team_credits", "location_credits",
-  "story_arc_credits", "object_credits", "concept_credits", "associated_images",
-  "character_died_in", "team_disbanded_in",
-  "first_appearance_characters", "first_appearance_concepts", "first_appearance_locations",
-  "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"
-]);
-
-// Per-resource field allowlist and relationship (defaults to []) sets for projection.
-const resourceConfig = {
-  volume: { fields: volumeFields, relationships: volumeCreditFields },
-  team: { fields: teamFields, relationships: teamRelationshipFields },
-  story_arc: { fields: storyArcFields, relationships: storyArcRelationshipFields },
-  publisher: { fields: publisherFields, relationships: publisherRelationshipFields },
-  person: { fields: personFields, relationships: personRelationshipFields },
-  issue: { fields: issueFields, relationships: issueRelationshipFields }
-};
+// Per-resource field allowlist and relationship sets live in fieldConfig.js, shared
+// with the live-API validator (src/validate.js).
 
 // Project a built result to a field_list. Requested fields that are present pass
 // through; absent relationships default to [] and absent scalars to null.
@@ -576,10 +511,19 @@ function createApiServer(
    // endpoints. Unset by default, so client limits are honored.
   const searchForcedLimit = options.searchForcedLimit === undefined ? null : positiveInt(options.searchForcedLimit, null);
 
-  // In-memory per-endpoint request stats for /api/status; resets on restart.
-  const requestStats = new Map();
+   // SRV-8: when enabled, detail responses are diffed against the live ComicVine
+   // API to verify the bundled data. The live key comes from the environment
+   // (COMICVINE_API_KEY); without it the validator cannot run and is skipped.
+   // `options.fetchFn` is an injectable live-fetch (used by tests); defaults to the
+   // real network call in validate.js.
+   const validateEnabled = Boolean(options.validate);
+   const validateApiKey = validateEnabled ? process.env.COMICVINE_API_KEY : null;
+   const validateFetchFn = options.fetchFn;
 
-  const server = createServer((request, response) => {
+   // In-memory per-endpoint request stats for /api/status; resets on restart.
+   const requestStats = new Map();
+
+  const server = createServer(async (request, response) => {
     const startedAt = Date.now();
     const requestUrl = new URL(request.url, "http://localhost");
     const requestPath = requestUrl.pathname;
@@ -771,7 +715,33 @@ function createApiServer(
          return;
         }
 
-      const result = projectResult(resource.singular, normalizeResult(config.build(row), resource.singular), fieldList);
+      const normalized = normalizeResult(config.build(row), resource.singular);
+      const result = projectResult(resource.singular, normalized, fieldList);
+
+      // SRV-8: when enabled and a key is present, diff the local entity against the
+      // live API before responding. The full (unprojected) result is compared, and
+      // collections are included for issues (the only type the live API returns
+      // them for). The diff is reported in the response `validation` field.
+      if (validateEnabled && validateApiKey) {
+        const compareCollections = resource.singular === "issue";
+        const validation = await validateEntity(resource.singular, id, normalized, validateApiKey, compareCollections, validateFetchFn);
+        logger({
+          type: "validation",
+          method: request.method,
+          path: requestPath,
+          resource: resource.singular,
+          id,
+          status: validation.status,
+          diffs: validation.diffs,
+          collections: validation.collections,
+          duration_ms: durationMs()
+        });
+        // The envelope keeps its shape; the diff is reported in an extra field.
+        const body = { ...comicVineResponse(result, 1, 0, 1), validation };
+        sendFormattedResponse(response, body, format, callback);
+        return;
+      }
+
       sendFormattedResponse(response, comicVineResponse(result, 1, 0, 1), format, callback);
       return;
       }
@@ -822,10 +792,13 @@ if (require.main === module) {
   if (process.env.COMICVINE_SEARCH_DEFAULT_LIMIT) options.searchDefaultLimit = process.env.COMICVINE_SEARCH_DEFAULT_LIMIT;
     // COMICVINE_FORCED_LIMIT overrides the client's ?limit on the search endpoint only.
   if (process.env.COMICVINE_FORCED_LIMIT) options.searchForcedLimit = process.env.COMICVINE_FORCED_LIMIT;
+    // COMICVINE_VALIDATE=1 enables SRV-8 live-API validation on detail endpoints;
+    // the live key is read from COMICVINE_API_KEY.
+  if (process.env.COMICVINE_VALIDATE) options.validate = true;
   const server = createApiServer(databasePath, undefined, options);
   server.listen(port, host, () => {
     console.log(`ComicVine API local listening at http://${host}:${port}`);
   });
 }
 
-module.exports = { createApiServer };
+module.exports = { createApiServer, resourceConfig };

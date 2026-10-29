@@ -18,7 +18,11 @@ npm start
 
 Paging limits follow ComicVine's defaults: list endpoints default to 100 and the search endpoint defaults to 10, with a maximum page size of 100. A requested `limit` is clamped to the maximum. Three environment variables override these controls: `COMICVINE_MAX_LIMIT` raises the maximum page size, `COMICVINE_DEFAULT_LIMIT` overrides the default for list endpoints, and `COMICVINE_SEARCH_DEFAULT_LIMIT` overrides the default for the search endpoint. When unset, each falls back to the values above. When `COMICVINE_FORCED_LIMIT` is set, that page size is applied to the **search endpoint only** and takes precedence over a client's `?limit=` (still clamped to the maximum); it does not affect list or detail endpoints. The same controls are available as the `maxLimit`, `defaultLimit`, `searchDefaultLimit`, and `searchForcedLimit` options of `createApiServer`.
 
-Each completed request is logged to stdout as JSON with its method, path, query, status, and duration. Credential-like query parameters such as `api_key` are redacted.
+Each completed request is logged to stdout as JSON with its method, path, query, status, and duration. Credential-like query parameters such as `api_key` are redacted. When validation mode is on, each diffed detail request also logs a `type: "validation"` entry with the resource, id, validation status, and any diffs.
+
+### Validation mode (live API)
+
+Set `COMICVINE_VALIDATE=1` (or pass `createApiServer` a `validate: true` option) to have each **detail** request also fetch the same entity from the live ComicVine API and diff it against the bundled data, reporting the result in an extra `validation` field on the response. The live API key is read from `COMICVINE_API_KEY`; without a key the validator is skipped and responses are unchanged. The diff compares scalar fields (ignoring `date_added`, `date_last_updated`, URLs, images, and the `count_of_*` counters) and, for issues, the credit/relationship collections. `validation.status` is `match`, `mismatch`, `missing_on_live`, or `unavailable`; `validation.diffs` lists the differing fields. This consumes live API quota, so enable it only when checking data freshness.
 
 ## Endpoints
 
@@ -74,6 +78,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-10-29 — Live-API validation on detail endpoints (SRV-8)
+
+- **Context:** there was no way to confirm the bundled data still matched the live ComicVine API after a sync.
+- **Change:** added `COMICVINE_VALIDATE=1` (or `validate: true`) so detail responses also diff the entity against the live API and report a `validation` field (`match`/`mismatch`/`missing_on_live`/`unavailable` + per-field diffs), and each diffed request logs a `type: "validation"` entry to stdout. The live key comes from `COMICVINE_API_KEY`. Extracted the per-resource field/relationship Sets into `src/fieldConfig.js` (shared by the server and the new `src/validate.js`) to avoid a require cycle; the live fetch is injectable for tests. Object references (e.g. a volume's `publisher`) diff by `id|name`, not a raw object.
+- **Gotcha / follow-up:** validation only runs when a key is present, and issues are the only type whose collections are diffed (the live API returns collections only for issues — see UPD-1). It consumes live quota, so keep it off in normal service.
 
 #### 2026-10-29 — `/api/status` statistics endpoint (SRV-9)
 

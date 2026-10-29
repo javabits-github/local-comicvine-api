@@ -9,6 +9,8 @@ applyTo: "src/server.js"
 
 `/api/status` is the one exception: it is local-only (not in the live API) and returns `{tables, sync_metadata, endpoints, total_requests}` without the envelope.
 
+When `COMICVINE_VALIDATE=1` (and `COMICVINE_API_KEY` is set), detail responses keep the envelope but add a `validation` field (`{status, diffs, collections}`) from the live-API diff.
+
 Every other response (list, detail, search) uses ComicVine's envelope:
 
 ```json

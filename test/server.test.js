@@ -651,3 +651,72 @@ test("serves a status endpoint with table counts, sync metadata, and request sta
     await new Promise((resolve) => statusServer.close(resolve));
   }
 });
+
+test("diffs detail responses against the live API in validation mode", async () => {
+  // The live fetch is injected so the test never touches the network. The fake
+  // returns a live entity that matches the local volume 7300 except that its
+  // name differs, so the validator should report a value diff on `name`.
+  const liveVolume = {
+    id: 7300,
+    name: "Witchblade (2000)",
+    aliases: "Witchblade (1995)",
+    start_year: "1995",
+    count_of_issues: 185,
+    deck: "A supernatural series.",
+    site_detail_url: "https://example.test/witchblade/",
+    date_added: "1995-01-01 00:00:00",
+    date_last_updated: "2020-04-15 10:00:00",
+    character_credits: [{ id: 1, name: "Sara Pezzini" }],
+    team_credits: [{ id: 2, name: "Witchblade Team" }]
+  };
+  const validateServer = createApiServer(databasePath, () => {}, {
+    validate: true,
+    fetchFn: async (singular, id) => liveVolume
+  });
+  await new Promise((resolve) => validateServer.listen(0, "127.0.0.1", resolve));
+  const validateUrl = `http://127.0.0.1:${validateServer.address().port}`;
+
+  try {
+    const response = await fetch(`${validateUrl}/api/volume/7300/`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+
+    // The envelope is unchanged; validation is an additional field.
+    assert.equal(body.status_code, 1);
+    assert.equal(body.results.name, "Witchblade");
+    assert.equal(body.validation.status, "mismatch");
+    assert.equal(body.validation.id, 7300);
+    const diffFields = body.validation.diffs.map((diff) => diff.field);
+    // `name` differs; date_added/date_last_updated and credits are ignored.
+    assert.ok(diffFields.includes("name"));
+    assert.ok(!diffFields.includes("date_added"));
+    assert.ok(!diffFields.includes("character_credits"));
+  } finally {
+    await new Promise((resolve) => validateServer.close(resolve));
+  }
+});
+
+test("reports a match when the live entity matches the local one", async () => {
+  const matchingLive = {
+    id: 7300,
+    name: "Witchblade",
+    aliases: "Witchblade (1995)",
+    start_year: "1995",
+    count_of_issues: 185,
+    deck: "A supernatural series."
+  };
+  const validateServer = createApiServer(databasePath, () => {}, {
+    validate: true,
+    fetchFn: async (singular, id) => matchingLive
+  });
+  await new Promise((resolve) => validateServer.listen(0, "127.0.0.1", resolve));
+  const validateUrl = `http://127.0.0.1:${validateServer.address().port}`;
+
+  try {
+    const body = await (await fetch(`${validateUrl}/api/volume/7300/`)).json();
+    assert.equal(body.validation.status, "match");
+    assert.deepEqual(body.validation.diffs, []);
+  } finally {
+    await new Promise((resolve) => validateServer.close(resolve));
+  }
+});
