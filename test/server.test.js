@@ -611,3 +611,43 @@ test("forces a limit that overrides a client-requested limit", async () => {
   await new Promise((resolve) => forcedServer.close(resolve));
   }
 });
+
+test("serves a status endpoint with table counts, sync metadata, and request stats", async () => {
+  const statusServer = createApiServer(databasePath, () => {});
+  await new Promise((resolve) => statusServer.listen(0, "127.0.0.1", resolve));
+  const statusUrl = `http://127.0.0.1:${statusServer.address().port}`;
+
+  try {
+    // Generate some traffic across list, detail, search, and a 404.
+    await fetch(`${statusUrl}/api/volumes/?limit=1`);
+    await fetch(`${statusUrl}/api/volume/7300/`);
+    await fetch(`${statusUrl}/api/volume/9999/`);
+    await fetch(`${statusUrl}/api/search/?query=witchblade`);
+    await fetch(`${statusUrl}/api/nope/`);
+
+    const response = await fetch(`${statusUrl}/api/status/`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+
+    assert.equal(body.tables.cv_volume, 2);
+    assert.equal(body.tables.cv_issue, 2);
+    assert.equal(body.tables.cv_publisher, 2);
+
+    // The test database has no cv_sync_metadata table, so it reports empty.
+    assert.deepEqual(body.sync_metadata, []);
+
+    assert.equal(body.total_requests, 5);
+    const byEndpoint = Object.fromEntries(body.endpoints.map((entry) => [entry.endpoint, entry]));
+    assert.equal(byEndpoint["/api/volumes/"].requests, 1);
+    // Detail requests aggregate under one key, including the 404.
+    // Both detail requests are HTTP 200: a missing id returns the 101 envelope
+    // with a 200 status (matching the live API), so only /api/nope/ is a 404.
+    assert.equal(byEndpoint["/api/volume/{id}/"].requests, 2);
+    assert.equal(byEndpoint["/api/volume/{id}/"].status_codes["200"], 2);
+    assert.equal(byEndpoint["/api/search/"].requests, 1);
+    assert.equal(byEndpoint["/api/nope/"].status_codes["404"], 1);
+    assert.ok(byEndpoint["/api/volumes/"].avg_duration_ms >= 0);
+  } finally {
+    await new Promise((resolve) => statusServer.close(resolve));
+  }
+});

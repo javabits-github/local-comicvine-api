@@ -7,7 +7,9 @@ applyTo: "src/server.js"
 
 ## Response envelope
 
-Every response (list, detail, search) uses ComicVine's envelope:
+`/api/status` is the one exception: it is local-only (not in the live API) and returns `{tables, sync_metadata, endpoints, total_requests}` without the envelope.
+
+Every other response (list, detail, search) uses ComicVine's envelope:
 
 ```json
 { "error": "OK", "limit": 100, "offset": 0,

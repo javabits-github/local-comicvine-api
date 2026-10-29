@@ -11,7 +11,8 @@ Open items and known gaps for the ComicVine local API.
 - [ ] **SRV-5 — Use SQLite full-text search instead of `LIKE`.** Replace the `LIKE '%value%'` matching in search and filters with a SQLite FTS5 index for faster, token-based text search.
 - [ ] **SRV-6 — Replace JSON-stored columns with n:n join tables.** Several relationship columns are stored as JSON text; model them as normalized n:n (join) tables and have the server generate the collections directly instead of storing denormalized copies of existing data.
 - [ ] **SRV-7 — Log to file.** Currently each request is logged to stdout as JSON. Add optional file logging (e.g. `COMICVINE_LOG_FILE`) with rotation, keeping stdout logging available.
-- [ ] **SRV-8 — Validation mode against the live API.** Add a mode that queries the live ComicVine API for single-resource endpoints and diffs the results against the local mock to verify the bundled data is correct.
+- [ ] **SRV-8 — Validation mode against the live API.** Add a mode that queries the live ComicVine API for single-resource endpoints and diffs the results against the local mock to verify the bundled data is correct. The live API key should be read from the `COMICVINE_API_KEY` environment variable (not a CLI flag), matching how the updater sources it.
+- [x] **SRV-9 — Add a status page with statistics.** Done: `/api/status` reports per-table row counts, `cv_sync_metadata` last-sync dates, and per-endpoint API call statistics (request counts, status codes, average duration).
 
 ## Updater (`sqlite_cv_updater/sqlite_cv_updater.py`)
 

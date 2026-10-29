@@ -393,6 +393,15 @@ function sendFormattedResponse(response, body, format, callback, resultItemName 
   sendJson(response, 200, body);
 }
 
+// Reduce a request path to a stable endpoint key so per-endpoint stats aggregate
+// across ids and query strings (e.g. /api/volume/4050-1487/ -> /api/volume/{id}/).
+function endpointKey(pathname) {
+  if (pathname === "/api" || pathname === "/api/") return "/api";
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments[0] !== "api" || segments.length < 2) return pathname;
+  return segments.length === 3 ? `/api/${segments[1]}/{id}/` : `/api/${segments[1]}/`;
+}
+
 // Keep list, detail, and search responses on the same ComicVine envelope shape.
 function comicVineResponse(results, limit, offset, total) {
   return {
@@ -567,6 +576,9 @@ function createApiServer(
    // endpoints. Unset by default, so client limits are honored.
   const searchForcedLimit = options.searchForcedLimit === undefined ? null : positiveInt(options.searchForcedLimit, null);
 
+  // In-memory per-endpoint request stats for /api/status; resets on restart.
+  const requestStats = new Map();
+
   const server = createServer((request, response) => {
     const startedAt = Date.now();
     const requestUrl = new URL(request.url, "http://localhost");
@@ -577,13 +589,21 @@ function createApiServer(
         requestUrl.searchParams.set(key, "[REDACTED]");
       }
     }
+    const durationMs = () => Date.now() - startedAt;
     response.once("finish", () => {
+      const status = response.statusCode;
+      const key = endpointKey(requestPath);
+      const entry = requestStats.get(key) ?? { requests: 0, status_codes: {}, duration_sum_ms: 0 };
+      entry.requests += 1;
+      entry.status_codes[status] = (entry.status_codes[status] ?? 0) + 1;
+      entry.duration_sum_ms += durationMs();
+      requestStats.set(key, entry);
       logger({
         method: request.method,
         path: requestPath,
         query: requestUrl.searchParams.toString(),
-        status: response.statusCode,
-        duration_ms: Date.now() - startedAt
+        status,
+        duration_ms: durationMs()
       });
     });
 
@@ -615,6 +635,45 @@ function createApiServer(
         available_resources: [...resourceByPath.entries()]
           .filter(([, resource]) => resource.table)
           .map(([name]) => name)
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/status" || url.pathname === "/api/status/") {
+      // Local-only endpoint (not part of the live ComicVine API): database
+      // coverage, sync freshness, and per-endpoint request statistics.
+      let tables = {};
+      try {
+        const rows = database.prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cv\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%' ORDER BY name`
+        ).all();
+        for (const row of rows) {
+          tables[row.name] = database.prepare(`SELECT COUNT(*) AS count FROM ${row.name}`).get().count;
+        }
+      } catch {
+        tables = {};
+      }
+      let sync_metadata = [];
+      try {
+        if (tableColumns(database, "cv_sync_metadata").size > 0) {
+          sync_metadata = database.prepare(
+            `SELECT endpoint, last_sync_date, last_sync_timestamp FROM cv_sync_metadata ORDER BY endpoint`
+          ).all();
+        }
+      } catch {
+        sync_metadata = [];
+      }
+      const endpoints = [...requestStats.entries()].map(([endpoint, entry]) => ({
+        endpoint,
+        requests: entry.requests,
+        status_codes: entry.status_codes,
+        avg_duration_ms: entry.requests ? Number((entry.duration_sum_ms / entry.requests).toFixed(2)) : 0
+      }));
+      sendJson(response, 200, {
+        tables,
+        sync_metadata,
+        endpoints,
+        total_requests: endpoints.reduce((sum, entry) => sum + entry.requests, 0)
       });
       return;
     }

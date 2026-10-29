@@ -36,7 +36,10 @@ GET /api/publishers?format=json&field_list=id,name,location_city&sort=name:asc&l
 GET /api/publisher/4010-4/?format=json&field_list=id,name,characters,story_arcs,teams,volumes
 GET /api/people?format=json&field_list=id,name,birth,death,country,gender,hometown&sort=name:asc&limit=50&offset=0
 GET /api/person/4040-1251/?format=json&field_list=id,name,created_characters,issue_credits,story_arc_credits,volume_credits
+GET /api/status/
 ```
+
+`/api/status` is a local-only endpoint (not part of the live ComicVine API). It reports the row count of every `cv_*` table, the `cv_sync_metadata` last-sync date and timestamp per endpoint, and per-endpoint request statistics (request counts, status-code breakdown, average duration) accumulated since the server started, plus the total request count.
 
 Volume details are available at `/api/volume/{id}`. Their `field_list` also supports `character_credits`, `concept_credits`, `location_credits`, `object_credits`, `person_credits`, and `team_credits`. For JSONP, provide `format=jsonp` and `json_callback=Your.callback`. Volume filters accept comma-separated `field:value` expressions or `field:start|end` date ranges.
 
@@ -71,6 +74,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-10-29 — `/api/status` statistics endpoint (SRV-9)
+
+- **Context:** there was no visibility into how stale or complete the local data was, or how the mock was being used.
+- **Change:** added `/api/status` reporting per-table row counts, `cv_sync_metadata` last-sync dates, and per-endpoint request stats (counts, status codes, average duration) from an in-memory accumulator keyed by normalized endpoint path. Detail routes aggregate under `/api/{resource}/{id}/`; missing ids still count as HTTP 200 (the 101 envelope matches the live API).
+- **Gotcha / follow-up:** stats reset on server restart; the endpoint is local-only and intentionally outside the ComicVine envelope.
 
 #### 2026-10-29 — Full sync, search-only forced limit, and rate-limit handling
 
