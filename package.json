@@ -1,0 +1,14 @@
+{
+  "name": "comicvine-api-local",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local mock ComicVine API backed by the supplied SQLite database.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

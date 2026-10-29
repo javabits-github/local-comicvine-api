@@ -1,0 +1,17 @@
+# Binary SQLite databases — multi-GB, not text; exclude all of them.
+# Covers localcv.db, the dated snapshots (localcv-*.db), the raw source dumps
+# (comicdb_*.db), backups, and their -wal/-shm journal sidecars.
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+*.db.pre-backfill.bak
+
+# Generated / dependency output
+node_modules/
+__pycache__/
+*.pyc
+
+# Local credentials (never useful to the agent; the .example templates are indexed)
+.env
+comicvine_config.env

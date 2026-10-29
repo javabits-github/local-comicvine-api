@@ -1,0 +1,175 @@
+# ComicVine Local — Architecture
+
+## Server request flow (`src/server.js`)
+
+```mermaid
+flowchart TB
+    C[Client] -->|GET /api/...| S[node:http server<br/>127.0.0.1:3333]
+
+    S --> R{"Route"}
+    R -->|/api/search/?query=..&resources=..| SE[Search handler]
+    R -->|/api/volumes/ etc.| LE[List handler]
+    R -->|"/api/volume/{id}/ etc."| DE["Detail handler"]
+    R -->|unknown| NF[404 / 400<br/>envelope with error]
+
+    SE --> LO[loop selected resources]
+    LO --> Q[(localcv.db<br/>node:sqlite)]
+    Q -->|name LIKE %query%<br/>volume: start_year DESC<br/>issue: issue_number ASC| LO
+    LO --> CAT[concatenate results<br/>slice to one page]
+
+    LE --> CFG[buildResourceConfig<br/>subquery + JOINs]
+    DE --> CFG
+    CFG --> Q
+    Q --> F[parseFilters<br/>LIKE partial, exact volume id, ranges]
+    F --> SO[parseSort — volume only<br/>else id ASC]
+    SO --> L[resolveLimit<br/>list 100 / search 10 / max 100<br/>searchForcedLimit = search only]
+    L --> Q
+
+    Q --> B[buildResult<br/>parseJsonColumn / parseCredits]
+    B --> FL[field_list projection]
+    FL --> EN[comicVine envelope<br/>error, limit, offset, counts, status_code, results]
+    CAT --> EN
+    DE --> EN
+    EN --> FM[format: json / xml / jsonp]
+    FM --> C
+
+    subgraph DB [localcv.db — 6 tables]
+        Q
+        PUB[cv_publisher]
+        VOL[cv_volume]
+        ISS[cv_issue]
+        PER[cv_person]
+        TEAM[cv_team]
+        ARC[cv_storyarc]
+        VOL -. publisher_id .-> PUB
+        ISS -. volume_id .-> VOL
+    end
+
+    style Q fill:#264f78,stroke:#6ea1d6,color:#fff
+    style EN fill:#5a3d8f,stroke:#9b7fd4,color:#fff
+    style NF fill:#7a2e2e,stroke:#c06060,color:#fff
+```
+
+## Updater sync pipeline (`sqlite_cv_updater.py`)
+
+```mermaid
+flowchart TB
+    CV[ComicVine live API<br/>comicvine.gamespot.com/api]
+
+    CV -->|HTTP 200 + status_code| AC[api_call<br/>retry loop, MAX_RETRIES = 5]
+    AC -->|107 rate limit| W[backoff 60s × attempt<br/>then retry]
+    W --> AC
+    AC -->|420| W4[wait 60s × attempt]
+    W4 --> AC
+    AC -->|100 invalid key| N1[return None → abort run]
+    AC -->|exhausted 107| N2[return None]
+
+    AC -->|status 1| SYNC{"run_sync<br/>per endpoint"}
+    N2 --> SYNC
+
+    SYNC --> SP[sync_publishers]
+    SYNC --> SV[sync_volumes]
+    SYNC --> SI[sync_issues]
+    SYNC --> SP2[sync_persons]
+    SYNC --> ST[sync_teams]
+    SYNC --> SA[sync_storyarcs]
+
+    SP & SV & SI & SP2 & ST & SA --> J[_jsonify every bound value<br/>dict/list → JSON text]
+    J --> U[(upsert into cv_* tables)]
+    U --> M[cv_sync_metadata<br/>last_sync_date — advanced only on success]
+
+    style AC fill:#264f78,stroke:#6ea1d6,color:#fff
+    style U fill:#264f78,stroke:#6ea1d6,color:#fff
+    style N2 fill:#7a2e2e,stroke:#c06060,color:#fff
+```
+
+## Database schema (`localcv.db`)
+
+Solid edges are real columns; dotted edges are JSON-text relationship columns (parsed in JS, never joined in SQL). Not every column is shown — see the updater for the full column list.
+
+```mermaid
+erDiagram
+    cv_publisher {
+        INTEGER id PK
+        TEXT name
+        TEXT characters "JSON array"
+        TEXT story_arcs "JSON array"
+        TEXT teams "JSON array"
+        TEXT volumes "JSON array"
+    }
+    cv_volume {
+        INTEGER id PK
+        TEXT name
+        TEXT start_year
+        INTEGER publisher_id FK
+        INTEGER count_of_issues
+        TEXT character_credits "JSON + count"
+        TEXT person_credits "JSON + count"
+        TEXT team_credits "JSON + count"
+        TEXT first_issue "JSON object"
+        TEXT last_issue "JSON object"
+    }
+    cv_issue {
+        INTEGER id PK
+        INTEGER volume_id FK
+        TEXT name
+        TEXT issue_number
+        TEXT person_credits "JSON + role"
+        TEXT character_credits "JSON"
+        TEXT team_credits "JSON"
+        TEXT story_arc_credits "JSON"
+        TEXT location_credits "JSON"
+        TEXT concept_credits "JSON"
+        TEXT object_credits "JSON"
+    }
+    cv_person {
+        INTEGER id PK
+        TEXT name
+        TEXT birth
+        TEXT death "JSON object"
+        TEXT created_characters "JSON"
+        TEXT issue_credits "JSON"
+        TEXT volume_credits "JSON"
+        TEXT story_arc_credits "JSON"
+    }
+    cv_team {
+        INTEGER id PK
+        TEXT name
+        TEXT publisher "JSON object"
+        TEXT characters "JSON"
+        TEXT issue_credits "JSON"
+        TEXT volume_credits "JSON"
+        TEXT movies "JSON"
+    }
+    cv_storyarc {
+        INTEGER id PK
+        TEXT name
+        TEXT publisher "JSON object"
+        TEXT issues "JSON"
+        TEXT movies "JSON"
+    }
+
+    cv_volume ||--o{ cv_issue : volume_id
+    cv_publisher ||--o{ cv_volume : publisher_id
+    cv_issue }o..o{ cv_person : person_credits
+    cv_issue }o..o{ cv_storyarc : story_arc_credits
+    cv_issue }o..o{ cv_team : team_credits
+    cv_person }o..o{ cv_volume : volume_credits
+    cv_person }o..o{ cv_issue : issue_credits
+    cv_team }o..o{ cv_issue : issue_credits
+    cv_publisher }o..o{ cv_volume : volumes
+    cv_storyarc }o..o{ cv_issue : issues
+```
+
+Notes on the schema:
+
+- `cv_sync_metadata` (endpoint, last_sync_date, last_sync_timestamp, resume_state) tracks updater progress per endpoint — not shown above.
+- Referenced ids inside JSON collections usually do **not** resolve to local rows (the DB is a synced subset), and character/location/object/concept/movie have no local table at all — the denormalized fields inside the JSON are the only source of that data.
+- `comicdb_*.db` (raw dumps), dated `localcv-*.db` snapshots, and the FTS tables (`volume_fts*`, `comic_covers`, `comic_files`) are out of scope for the API and excluded here.
+
+## Notes
+
+- **Server** is a single file, zero npm deps: `node:http` + `node:sqlite`. Only `volume` honors `?sort=`; only `search` honors `COMICVINE_FORCED_LIMIT`.
+- **Search** matches `name LIKE %query%` per selected resource (volumes newest-first, issues by numeric issue number), concatenates the hits in resource order, then slices one page — so `number_of_total_results` is the combined count across resources.
+- **Updater** is incremental by default (`date_last_updated` filter since last safe sync date); `--full` drops the filter. Skipped endpoints (rate-limit exhaustion) don't advance `cv_sync_metadata`, so the next run re-syncs from the old start date.
+- Credit/relationship columns are JSON text; the server parses them in JS, never in SQL.
