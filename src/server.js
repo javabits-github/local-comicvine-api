@@ -575,6 +575,34 @@ function resolveLimit(requested, defaultLimit, maxLimit) {
   return Math.min(Math.max(Math.floor(limit), 1), maxLimit);
 }
 
+// Parse a comma/whitespace-separated list of integers (e.g. "5, 9, 42"), dropping
+// blanks and non-numeric tokens and de-duplicating. Non-numeric tokens are ignored
+// rather than throwing so a stray token never breaks a request.
+function parseIdList(value) {
+  if (value === undefined || value === null) return [];
+  const seen = new Set();
+  const ids = [];
+  for (const token of String(value).split(/[\s,]+/)) {
+    if (!token) continue;
+    const id = Number(token);
+    if (!Number.isSafeInteger(id)) continue;
+    if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+// SRV-12: a `publisher_id NOT IN (...)` predicate for volume queries. Empty when
+// there is no blocklist or the resource has no publisher_id column. Returns separate
+// clause and values so the caller can append both to a prepared statement.
+function publisherBlocklistPredicate(config, ids) {
+  if (!ids.length || !config.columns.has("publisher_id")) return { clause: "", values: [] };
+  const placeholders = ids.map(() => "?").join(", ");
+  return { clause: ` AND ${config.alias}.publisher_id NOT IN (${placeholders})`, values: ids };
+}
+
 // Default logger: one line per entry, prefixed with a readable timestamp and
 // level, written to the stream matching its level. Custom loggers (e.g. tests)
 // receive the stamped entry directly and ignore this formatting.
@@ -604,6 +632,16 @@ function createApiServer(
    // only (still clamped to maxLimit). It does not affect list or detail
    // endpoints. Unset by default, so client limits are honored.
   const searchForcedLimit = options.searchForcedLimit === undefined ? null : positiveInt(options.searchForcedLimit, null);
+
+   // SRV-12: publisher ids whose volumes are excluded from search and list
+   // results. `options.publisherBlocklist` is an array of ids; when unset it
+   // falls back to the COMICVINE_PUBLISHER_BLOCKLIST env var (comma-separated).
+   // Applied only to volumes (the only resource with a publisher_id column).
+   const publisherBlocklist = parseIdList(
+     options.publisherBlocklist !== undefined
+       ? (Array.isArray(options.publisherBlocklist) ? options.publisherBlocklist.join(",") : options.publisherBlocklist)
+       : process.env.COMICVINE_PUBLISHER_BLOCKLIST
+   );
 
    // SRV-8: when enabled, detail responses are diffed against the live ComicVine
    // API to verify the bundled data. The live key comes from the environment
@@ -771,9 +809,14 @@ function createApiServer(
         } else {
           orderBy = `${config.alias}.id`;
         }
+        // SRV-12: exclude blocked publishers from volume search. Search has no
+        // ?filter= parameter, so the blocklist always applies when set.
+        const blocklist = config.singular === "volume"
+          ? publisherBlocklistPredicate(config, publisherBlocklist)
+          : { clause: "", values: [] };
         const matched = database.prepare(
-          `SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${config.alias}.name LIKE lower(?) ESCAPE '\\' COLLATE NOCASE ORDER BY ${orderBy}`
-           ).all(pattern);
+          `SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${config.alias}.name LIKE lower(?) ESCAPE '\\' COLLATE NOCASE${blocklist.clause} ORDER BY ${orderBy}`
+           ).all(pattern, ...blocklist.values);
         total += matched.length;
         for (const row of matched) allResults.push(projectSearchFields(resource, config.build(row), url.searchParams.get("field_list")));
         }
@@ -862,15 +905,27 @@ function createApiServer(
      const limit = resolveLimit(requestedLimit, defaultLimit, maxLimit);
      const offset = Number.isFinite(requestedOffset) ? Math.max(requestedOffset, 0) : 0;
      const { clauses, values } = parseFilters(url.searchParams.get("filter"), config);
-     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+     // SRV-12: exclude blocked publishers from list results, but never override an
+     // explicit publisher filter the client requested (publisher_id or publisher).
+     const filterText = url.searchParams.get("filter") ?? "";
+     const hasPublisherFilter = filterText
+       .split(",")
+       .some((expression) => {
+         const match = expression.match(/^([a-z][a-z0-9_]*):/i);
+         return match && ["publisher_id", "publisher"].includes(match[1].toLowerCase());
+       });
+     const blocklist = resource.singular === "volume" && !hasPublisherFilter
+       ? publisherBlocklistPredicate(config, publisherBlocklist)
+       : { clause: "", values: [] };
+     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}${blocklist.clause}` : (blocklist.clause ? ` WHERE 1 = 1${blocklist.clause}` : "");
      const orderBy = resource.singular === "volume"
       ? parseSort(config, url.searchParams.get("sort"), sortableVolumeFields)
       : "id ASC";
      const total = database.prepare(`SELECT COUNT(*) AS count FROM (${config.subquery}) ${config.alias}${where}`)
-      .get(...values).count;
+      .get(...values, ...blocklist.values).count;
      const rows = database.prepare(
       `SELECT * FROM (${config.subquery}) ${config.alias}${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`
-      ).all(...values, limit, offset);
+      ).all(...values, ...blocklist.values, limit, offset);
      const results = rows.map((row) => {
       const built = config.build(row);
       const normalized = resource.singular === "volume" || resource.singular === "issue"

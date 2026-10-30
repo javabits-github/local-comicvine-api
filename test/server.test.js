@@ -768,3 +768,47 @@ test("reports a match when the live entity matches the local one", async () => {
     await new Promise((resolve) => validateServer.close(resolve));
   }
 });
+
+test("excludes blocked publishers from volume search and list (SRV-12)", async () => {
+  const blockDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-blocklist-test-"));
+  const blockDatabasePath = path.join(blockDirectory, "blocklist.db");
+  const blockDatabase = new DatabaseSync(blockDatabasePath);
+  blockDatabase.exec(`
+    CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, site_detail_url TEXT);
+    CREATE TABLE cv_volume (
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT,
+      publisher_id INTEGER, count_of_issues INTEGER, description TEXT,
+      image_url TEXT, site_detail_url TEXT
+    );
+  `);
+  blockDatabase.prepare("INSERT INTO cv_publisher VALUES (?, ?, ?)").run(31, "Top Cow", "https://example.test/top-cow");
+  blockDatabase.prepare("INSERT INTO cv_publisher VALUES (?, ?, ?)").run(42, "Dark Horse", "https://example.test/dark-horse");
+  blockDatabase.prepare("INSERT INTO cv_volume VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(7300, "Top Cow Book", null, "1995", 31, 5, null, null, "https://example.test/top-cow-book");
+  blockDatabase.prepare("INSERT INTO cv_volume VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(7301, "Dark Horse Book", null, "1996", 42, 3, null, null, "https://example.test/dark-horse-book");
+  blockDatabase.close();
+
+  const blockServer = createApiServer(blockDatabasePath, () => {}, { publisherBlocklist: [42] });
+  await new Promise((resolve) => blockServer.listen(0, "127.0.0.1", resolve));
+  const blockUrl = `http://127.0.0.1:${blockServer.address().port}`;
+
+  try {
+    // Search: the blocked publisher's volume is excluded; the unblocked one remains.
+    const search = await (await fetch(`${blockUrl}/api/search/?query=Book&resources=volume&limit=10`)).json();
+    const searchIds = search.results.map((result) => result.id);
+    assert.deepEqual(searchIds, [7300]);
+    assert.equal(search.number_of_total_results, 1);
+
+    // List: same exclusion applies when no explicit publisher filter is present.
+    const list = await (await fetch(`${blockUrl}/api/volumes?limit=10&field_list=id`)).json();
+    assert.deepEqual(list.results.map((result) => result.id), [7300]);
+
+    // An explicit publisher filter overrides the blocklist (both volumes return).
+    const filtered = await (await fetch(`${blockUrl}/api/volumes?filter=publisher_id:42&limit=10&field_list=id`)).json();
+    assert.deepEqual(filtered.results.map((result) => result.id), [7301]);
+  } finally {
+    await new Promise((resolve) => blockServer.close(resolve));
+    rmSync(blockDirectory, { recursive: true, force: true });
+  }
+});

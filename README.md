@@ -24,6 +24,10 @@ Each completed request is logged to stdout as JSON with its method, path, query,
 
 Set `COMICVINE_VALIDATE=1` (or pass `createApiServer` a `validate: true` option) to have each **detail** request also fetch the same entity from the live ComicVine API and diff it against the bundled data, reporting the result in an extra `validation` field on the response. The live API key is read from `COMICVINE_API_KEY`; without a key the validator is skipped and responses are unchanged. The diff compares scalar fields (ignoring `date_added`, `date_last_updated`, URLs, images, and the `count_of_*` counters) and, for issues, the credit/relationship collections. `validation.status` is `match`, `mismatch`, `missing_on_live`, or `unavailable`; `validation.diffs` lists the differing fields. This consumes live API quota, so enable it only when checking data freshness.
 
+### Publisher blocklist (volume search and list)
+
+Set `COMICVINE_PUBLISHER_BLOCKLIST` to a comma-separated list of publisher ids (e.g. `5,9,42`) to exclude a publisher's volumes from the **volume** search and list results. Only volumes are affected — it is the only local resource with a `publisher_id` column, so it has no effect on issues, people, teams, or story arcs. The blocklist is a `publisher_id NOT IN (...)` predicate. On the list endpoint it does **not** override an explicit `?filter=publisher_id=…` or `?filter=publisher=…` request — an explicit publisher filter wins. It is also available as the `publisherBlocklist` option of `createApiServer` (an array of ids), which takes precedence over the environment variable.
+
 ## Endpoints
 
 The configured `localcv.db` provides volumes, issues, publishers, people, teams, and story arcs. These endpoints use the ComicVine response envelope; volumes, publishers, people, teams, and story arcs also support field selection, sorting, filters, and JSON, XML, or JSONP formats. Issue list and detail responses also honor `field_list`, omitting unrequested fields such as the credit arrays; unrecognized field names are ignored. An issue's `volume` object includes `id`, `name`, `api_detail_url`, and `site_detail_url`; `api_detail_url` is derived from the volume ID when it is not stored in the database. Issue filters on `volume` or `volume_id` compare exact IDs and accept either a number or ComicVine ID such as `4050-7300`. Each resource reads its normalized columns directly from the database; credit arrays and relationship objects are stored as JSON text and parsed on demand, so no raw API payload is stored in `localcv.db`. Resources whose tables are absent return 404.
@@ -101,6 +105,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-10-30 — Publisher blocklist on volume search (SRV-12)
+
+- **Context:** there was no way to hide a publisher's volumes from search/list without a per-request filter.
+- **Change:** added a `publisher_id NOT IN (...)` predicate (`publisherBlocklistPredicate`) driven by `COMICVINE_PUBLISHER_BLOCKLIST` (comma-separated) or the `publisherBlocklist` option (array of ids). It applies to volume search and list. On the list endpoint it is skipped when the request carries an explicit `?filter=publisher_id=`/`publisher=` term, so an explicit filter wins; on search (no `?filter`) it always applies. `parseIdList` ignores non-numeric tokens.
+- **Gotcha / follow-up:** only volumes are affected because they are the only resource with a `publisher_id` column — the helper no-ops for other resources. Non-issue resources have no publisher column to block on.
 
 #### 2026-10-30 — Docker image (DEPLOY-1)
 
