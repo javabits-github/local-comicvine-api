@@ -57,6 +57,17 @@ Publisher details are available at `/api/publisher/{id}`. Their `field_list` als
 
 Search accepts comma-separated `resources`, matches query text against names only, and supports `field_list` projection. It returns `resource_type` with each hit and supports JSON, XML, and JSONP. Its default limit is 10 and maximum is 100. Resources without a table in `localcv.db` return no search results. `api_key` is ignored by the mock. `subscriber_only` is accepted but has no filtering behavior because its spec does not define the parameter. Responses use ComicVine's `error`, `limit`, `offset`, result-count, `status_code`, and `results` fields.
 
+## Syncing Data
+
+The updater is a zero-dependency Node.js script ([src/updater.js](src/updater.js)) that syncs data from the live ComicVine API into `localcv.db` using `node:sqlite` and `fetch`. It is the Node port of the original Python updater (`sqlite_cv_updater/sqlite_cv_updater.py`), which remains for reference.
+
+```powershell
+npm sync          # incremental sync (since the last sync date)
+npm sync:full     # one-time full refresh (no date filter; thousands of live API calls)
+```
+
+`npm sync` runs the updater with `--env-file-if-exists=.env`, so `COMICVINE_API_KEY` is read from `.env`. The key is resolved in order: the `--api-key` flag, then the `comicvine_config.env` file, then the `COMICVINE_API_KEY` environment variable. The updater opens the database in WAL mode, upserts each resource into its `cv_*` table (all bound values go through a JSON serializer), and advances `cv_sync_metadata.last_sync_date` only for endpoints that succeed. It reuses the server's `field_list` projection and the live API's retry contract (107 → escalating backoff, 100 → abort, 420 → wait). The updater's email report and GUI database picker (Python `smtplib`/`tkinter`) have no zero-dependency Node equivalent and are not implemented. See [sqlite_cv_updater/README.md](sqlite_cv_updater/README.md) for the full flag reference.
+
 ## Test
 
 ```powershell
@@ -78,6 +89,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-10-29 — Node.js updater port (UPD-3)
+
+- **Context:** the sync updater was Python (`sqlite_cv_updater/sqlite_cv_updater.py`), so running a sync required a Python environment separate from the zero-dependency Node server.
+- **Change:** ported the updater to `src/updater.js` using `node:sqlite` and `fetch` (no npm dependencies), so sync and server share one runtime. Added `npm sync` / `npm sync:full`. The port preserves the field lists, the upsert SQL, the live API's retry contract (1.5s inter-call delay, 107 → 60s×attempt backoff, 100 → abort, 420 → 600s×attempt wait), the resume state, dated-database copy/cleanup, and the config-file/env key precedence. The Python `smtplib` email report and `tkinter` GUI picker have no zero-dependency Node equivalent and were dropped.
+- **Gotcha / follow-up:** `node:sqlite` rejects boolean binds (Python's `sqlite3` coerces `True`/`False` to 1/0), so `jsonify` maps booleans to `1`/`0`; PRAGMAs must go through `exec()` rather than a prepared statement. The Python script remains in the repo for reference.
 
 #### 2026-10-29 — Log levels and timestamps (SRV-10)
 

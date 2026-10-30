@@ -19,7 +19,7 @@ Open items and known gaps for the ComicVine local API.
 
 - [ ] **UPD-1 — Full sync does not refresh collections for non-issue types.** The live API returns collections (credits, relationships) only for issue resources, so a `--full` sync fully refreshes issues but leaves stored credits/relationships on volumes, people, teams, and story arcs at their last incremental values. Document or backfill these on a full pass.
 - [ ] **UPD-2 — Full sync is expensive (thousands of live calls).** A full sync issues one unfiltered call per page across all six endpoints. Consider a warning or confirmation prompt in non-interactive runs.
-- [ ] **UPD-3 — Rewrite the updater in Node.js.** Port `sqlite_cv_updater/sqlite_cv_updater.py` to a Node.js script built on `node:sqlite` and `fetch`, so the sync tooling shares the server's runtime and drops the Python dependency.
+- [x] **UPD-3 — Rewrite the updater in Node.js.** Port `sqlite_cv_updater/sqlite_cv_updater.py` to a Node.js script built on `node:sqlite` and `fetch`, so the sync tooling shares the server's runtime and drops the Python dependency.
 
 ## Database
 

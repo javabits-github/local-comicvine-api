@@ -1,5 +1,7 @@
 # ComicVine SQLite Database Updater
 
+> **Node.js port (recommended):** the updater is now written in Node.js at [`../src/updater.js`](../src/updater.js), using `node:sqlite` and `fetch` with no npm dependencies. Run it with `npm sync` (incremental) or `npm sync:full` (full refresh) from the project root. This page documents the original Python implementation, which remains in this directory for reference. The Node port covers the same sync behaviour (field lists, upserts, retry/backoff, resume state, dated-database copy/cleanup, config-file/env key precedence); the Python-only email report (`smtplib`) and GUI picker (`tkinter`) have no zero-dependency Node equivalent.
+
 A Python script that maintains a local SQLite database of ComicVine data with automatic daily updates, email notifications, and intelligent cleanup.
 
 Based on [/u/Logical-Feedback-543's](https://old.reddit.com/r/comicrackusers/comments/1q7rex8/here_it_is_an_offline_comicvine_tagger_for/) script. 
@@ -278,6 +280,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-10-29 — Superseded by the Node.js updater (UPD-3)
+
+- **Context:** the project goal is a zero-dependency Node.js server, and a Python updater forced a second runtime for syncing.
+- **Change:** the updater was ported to `src/updater.js` (Node `node:sqlite` + `fetch`), exposed as `npm sync` / `npm sync:full`. This Python script is kept for reference; the Node version is the tool to run.
+- **Gotcha / follow-up:** the Python `smtplib` email report and `tkinter` GUI picker were dropped (no zero-dependency Node equivalent). `node:sqlite` rejects boolean binds, so the port's JSON serializer maps booleans to `1`/`0` (Python `sqlite3` coerces them implicitly).
 
 #### 2026-10-29 — Rate-limit (status 107) handling
 

@@ -50,31 +50,33 @@ flowchart TB
     style NF fill:#7a2e2e,stroke:#c06060,color:#fff
 ```
 
-## Updater sync pipeline (`sqlite_cv_updater.py`)
+## Updater sync pipeline (`src/updater.js`)
+
+The updater is a zero-dependency Node.js script (`node:sqlite` + `fetch`), the port of the original `sqlite_cv_updater/sqlite_cv_updater.py` (kept for reference). Run it with `npm sync` (incremental) or `npm sync:full`.
 
 ```mermaid
 flowchart TB
     CV[ComicVine live API<br/>comicvine.gamespot.com/api]
 
-    CV -->|HTTP 200 + status_code| AC[api_call<br/>retry loop, MAX_RETRIES = 5]
+    CV -->|HTTP 200 + status_code| AC[apiCall<br/>retry loop, MAX_RETRIES = 5]
     AC -->|107 rate limit| W[backoff 60s × attempt<br/>then retry]
     W --> AC
-    AC -->|420| W4[wait 60s × attempt]
+    AC -->|420| W4[wait 600s × attempt]
     W4 --> AC
-    AC -->|100 invalid key| N1[return None → abort run]
-    AC -->|exhausted 107| N2[return None]
+    AC -->|100 invalid key| N1[return null → abort run]
+    AC -->|exhausted 107| N2[return null]
 
-    AC -->|status 1| SYNC{"run_sync<br/>per endpoint"}
+    AC -->|status 1| SYNC{"runSync<br/>per endpoint"}
     N2 --> SYNC
 
-    SYNC --> SP[sync_publishers]
-    SYNC --> SV[sync_volumes]
-    SYNC --> SI[sync_issues]
-    SYNC --> SP2[sync_persons]
-    SYNC --> ST[sync_teams]
-    SYNC --> SA[sync_storyarcs]
+    SYNC --> SP[syncPublishers]
+    SYNC --> SV[syncVolumes]
+    SYNC --> SI[syncIssues]
+    SYNC --> SP2[syncPersons]
+    SYNC --> ST[syncTeams]
+    SYNC --> SA[syncStoryarcs]
 
-    SP & SV & SI & SP2 & ST & SA --> J[_jsonify every bound value<br/>dict/list → JSON text]
+    SP & SV & SI & SP2 & ST & SA --> J["jsonify every bound value<br/>dict/list/bool → JSON text / 1-0"]
     J --> U[(upsert into cv_* tables)]
     U --> M[cv_sync_metadata<br/>last_sync_date — advanced only on success]
 

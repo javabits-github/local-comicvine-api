@@ -7,6 +7,9 @@ npm-debug.log*
 .env
 sqlite_cv_updater/comicvine_config.env
 
+# Editor / IDE
+.vscode/
+
 # Python bytecode
 __pycache__/
 
