@@ -11,6 +11,6 @@
     "sync:full": "node --env-file-if-exists=.env src/updater.js --full"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=26.13.0"
   }
 }

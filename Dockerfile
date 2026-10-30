@@ -1,7 +1,7 @@
 # ComicVine local API — single image for both the server and the updater.
 #
 # Both entry points are zero-dependency Node.js (node:sqlite + fetch), so a
-# single node:22-slim image serves the API and can also run a sync. There is no
+# single node:26-slim image serves the API and can also run a sync. There is no
 # npm install step: the app has no runtime dependencies.
 #
 # The database is NOT baked into the image (localcv.db is gitignored and
@@ -15,7 +15,7 @@
 #   docker run --rm -v ./data:/data -e COMICVINE_API_KEY=... \
 #     comicvine npm run sync -- --db /data/localcv.db
 
-FROM node:22-slim
+FROM node:26-slim
 
 WORKDIR /app
 

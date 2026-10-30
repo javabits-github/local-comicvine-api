@@ -5,7 +5,7 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 ## Commands
 
 - `npm start` — run the API server (loads `.env`; defaults to `127.0.0.1:3333`)
-- `npm test` — run the 23 node built-in tests (`node --test`)
+- `npm test` — run the 37 node built-in tests (`node --test`)
 - `python3 sqlite_cv_updater/sqlite_cv_updater.py` — incremental sync from the live API
 - `python3 sqlite_cv_updater/sqlite_cv_updater.py --full` — one-time full sync (thousands of live API calls; no date filter)
 

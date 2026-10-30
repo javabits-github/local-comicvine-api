@@ -5,7 +5,7 @@ It uses Node.js built-in HTTP and SQLite modules, so no npm dependencies are req
 
 ## Requirements
 
-- Node.js 22.13 or newer
+- Node.js 26.13 or newer
 - The SQLite database in the project root, or a path supplied through `COMICVINE_DB_PATH`
 
 ## Run
@@ -74,7 +74,7 @@ npm sync:full     # one-time full refresh (no date filter; thousands of live API
 
 ## Docker
 
-Both the server ([src/server.js](src/server.js)) and the updater ([src/updater.js](src/updater.js)) are zero-dependency Node.js, so a single slim `node:22` image ([Dockerfile](Dockerfile)) runs either — there is no `npm install`. The database is **not** baked into the image: `localcv.db` is gitignored and multi-GB, so it is supplied at runtime as a volume mounted at `/data`, and both entry points are pointed at it via `COMICVINE_DB_PATH` / `--db`.
+Both the server ([src/server.js](src/server.js)) and the updater ([src/updater.js](src/updater.js)) are zero-dependency Node.js, so a single slim `node:26` image ([Dockerfile](Dockerfile)) runs either — there is no `npm install`. The database is **not** baked into the image: `localcv.db` is gitignored and multi-GB, so it is supplied at runtime as a volume mounted at `/data`, and both entry points are pointed at it via `COMICVINE_DB_PATH` / `--db`.
 
 ```powershell
 docker compose up server      # serve the API on http://localhost:3333
@@ -105,6 +105,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-10-30 — Node.js 26 upgrade
+
+- **Context:** the development machine was upgraded to Node.js 26.13.0.
+- **Change:** bumped the minimum requirement to `>=26.13.0` ([package.json](package.json) `engines`, Requirements section) and the Docker base image to `node:26-slim` ([Dockerfile](Dockerfile)). No code changes were needed: the server and updater only use stable built-ins (`node:http`, `node:sqlite`, global `fetch`, `node:fs`/`path`/`os`), all of which behave the same on Node 26 as on 22.
+- **Gotcha / follow-up:** the `node:26-slim` tag must exist on Docker Hub before the first `docker compose build`; if the build fails to pull it, fall back to `node:24-slim` — the app has no version-specific dependencies.
 
 #### 2026-10-30 — Publisher blocklist on volume search (SRV-12)
 
