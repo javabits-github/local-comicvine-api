@@ -37,7 +37,7 @@ Open items and known gaps for the ComicVine local API.
 
 ## Deployment
 
-- [ ] **DEPLOY-1 — Add a Dockerfile.** The server is zero-dependency Node.js, so it can run on a slim `node:22` image; the updater is Python. Decide whether to ship a single multi-stage image (server + updater) or separate images, and how the large `localcv.db` gets in (build-arg, mounted volume, or a separate data image) since it is gitignored.
+- [x] **DEPLOY-1 — Add a Dockerfile.** Done: a single `node:22-slim` image ([Dockerfile](Dockerfile)) runs both the server (default `CMD npm start`) and the Node updater (`npm run sync -- --db /data/localcv.db`) — one runtime, no `npm install`. The multi-GB gitignored `localcv.db` is **not** baked in; it is supplied as a host volume at `/data` (see [docker-compose.yml](docker-compose.yml) and [.dockerignore](.dockerignore)), so the image stays small and the same volume is shared between the server and sync services. See the README "Docker" section.
 
 ## Docs
 

@@ -1,0 +1,45 @@
+# ComicVine local API. The database is supplied as a host-mounted volume at
+# /data and is NOT baked into the image. Copy an existing localcv.db into ./data
+# (or run a sync to build one) before starting the server.
+#
+#   docker compose up server        # serve the API on http://localhost:3333
+#   docker compose run sync         # incremental sync (needs COMICVINE_API_KEY)
+#   docker compose run sync-full    # one-time full refresh
+
+services:
+  server:
+    build: .
+    image: comicvine
+    volumes:
+      - ./data:/data
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3333"
+      COMICVINE_DB_PATH: /data/localcv.db
+      # Optional live-API validation on detail endpoints (consumes live quota):
+      # COMICVINE_API_KEY:
+      # COMICVINE_VALIDATE: "1"
+    ports:
+      - "3333:3333"
+
+  sync:
+    build: .
+    image: comicvine
+    profiles: ["tools"] # run explicitly with `docker compose run sync`
+    volumes:
+      - ./data:/data
+    environment:
+      COMICVINE_DB_PATH: /data/localcv.db
+      COMICVINE_API_KEY: ${COMICVINE_API_KEY:?Set COMICVINE_API_KEY to run a sync}
+    command: ["npm", "run", "sync", "--", "--db", "/data/localcv.db"]
+
+  sync-full:
+    build: .
+    image: comicvine
+    profiles: ["tools"] # run explicitly with `docker compose run sync-full`
+    volumes:
+      - ./data:/data
+    environment:
+      COMICVINE_DB_PATH: /data/localcv.db
+      COMICVINE_API_KEY: ${COMICVINE_API_KEY:?Set COMICVINE_API_KEY to run a sync}
+    command: ["npm", "run", "sync:full", "--", "--db", "/data/localcv.db"]

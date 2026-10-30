@@ -68,6 +68,18 @@ npm sync:full     # one-time full refresh (no date filter; thousands of live API
 
 `npm sync` runs the updater with `--env-file-if-exists=.env`, so `COMICVINE_API_KEY` is read from `.env`. The key is resolved in order: the `--api-key` flag, then the `comicvine_config.env` file, then the `COMICVINE_API_KEY` environment variable. The updater opens the database in WAL mode, upserts each resource into its `cv_*` table (all bound values go through a JSON serializer), and advances `cv_sync_metadata.last_sync_date` only for endpoints that succeed. It reuses the server's `field_list` projection and the live API's retry contract (107 → escalating backoff, 100 → abort, 420 → wait). The updater's email report and GUI database picker (Python `smtplib`/`tkinter`) have no zero-dependency Node equivalent and are not implemented. See [sqlite_cv_updater/README.md](sqlite_cv_updater/README.md) for the full flag reference.
 
+## Docker
+
+Both the server ([src/server.js](src/server.js)) and the updater ([src/updater.js](src/updater.js)) are zero-dependency Node.js, so a single slim `node:22` image ([Dockerfile](Dockerfile)) runs either — there is no `npm install`. The database is **not** baked into the image: `localcv.db` is gitignored and multi-GB, so it is supplied at runtime as a volume mounted at `/data`, and both entry points are pointed at it via `COMICVINE_DB_PATH` / `--db`.
+
+```powershell
+docker compose up server      # serve the API on http://localhost:3333
+docker compose run sync       # incremental sync (requires COMICVINE_API_KEY)
+docker compose run sync-full  # one-time full refresh
+```
+
+[.dockerignore](.dockerignore) keeps the image to the source and `package.json` only (no databases, `.env`, the legacy Python updater, docs, or VCS files). [docker-compose.yml](docker-compose.yml) mounts `./data` at `/data` for the `server` service and defines `sync` / `sync-full` services under the `tools` profile. Put an existing `localcv.db` in `./data` (or run a sync to build one) before starting the server.
+
 ## Test
 
 ```powershell
@@ -89,6 +101,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-10-30 — Docker image (DEPLOY-1)
+
+- **Context:** the app had no container packaging; the server is zero-dependency Node.js and the updater was ported to Node (UPD-3), but the database is gitignored and multi-GB.
+- **Change:** added a single `node:22-slim` [Dockerfile](Dockerfile) that runs **both** the server (default `CMD npm start`) and the updater (`npm run sync -- --db /data/localcv.db`) from one image, plus a [.dockerignore](.dockerignore) and a [docker-compose.yml](docker-compose.yml) with `server` / `sync` / `sync-full` services.
+- **Gotcha / follow-up:** because both tools are the same runtime, one image is enough — no multi-stage or separate Python image is needed. The DB is provided as a host volume at `/data` (never built into the image), so the image stays small and portable; the same volume is shared between the server and sync services so a sync's writes are visible to the running server.
 
 #### 2026-10-29 — Volume credits normalized into join tables (SRV-6c)
 

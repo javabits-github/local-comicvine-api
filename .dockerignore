@@ -1,0 +1,25 @@
+# Databases (multi-GB, gitignored, provided as a volume at runtime).
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+*.db.pre-backfill.bak
+
+# Environment and credentials — supplied at runtime, never baked in.
+.env
+
+# Node / Python artifacts.
+node_modules/
+__pycache__/
+
+# The legacy Python updater is not part of the image (the Node updater is used).
+sqlite_cv_updater/
+
+# Docs, tooling, and VCS.
+docs/
+.github/
+.vscode/
+.git/
+.gitignore
+LICENSE
+TODO.md

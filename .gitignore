@@ -10,6 +10,9 @@ sqlite_cv_updater/comicvine_config.env
 # Editor / IDE
 .vscode/
 
+# Docker runtime data (the database is mounted here at /data)
+data/
+
 # Python bytecode
 __pycache__/
 
