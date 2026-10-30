@@ -196,6 +196,178 @@ class ComicVineUpdater {
     }
   }
 
+  // ─── SRV-6c: volume credit/issue-reference normalization ───────────────
+
+  // The six volume credit collections and the first/last issue references are
+  // stored as JSON text on cv_volume. This method normalizes them into join
+  // tables so the server can generate the collections directly:
+  //   - cv_volume_credit: one row per credit entry (credit_type + position).
+  //   - cv_volume_issue_ref: one row per first/last issue reference.
+  //   - cv_volume.credits_presence: a bitmask (bit i = credit type i) that
+  //     distinguishes an empty [] collection from a null one.
+  // It backfills the join tables from the JSON columns and then drops those
+  // columns. The live API returns collections only for issues, so volume
+  // credits are historical; first/last issue keep refreshing via syncVolumes.
+  ensureVolumeCreditTables() {
+    if (!this.conn) return;
+    this.conn.exec(`
+      CREATE TABLE IF NOT EXISTS cv_volume_credit (
+        volume_id INTEGER NOT NULL,
+        credit_type TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        credit_id INTEGER,
+        name TEXT,
+        count TEXT,
+        api_detail_url TEXT,
+        site_detail_url TEXT,
+        PRIMARY KEY (volume_id, credit_type, position)
+      )
+    `);
+    this.conn.exec(`
+      CREATE INDEX IF NOT EXISTS idx_volume_credit_type
+        ON cv_volume_credit (credit_type, credit_id)
+    `);
+    this.conn.exec(`
+      CREATE TABLE IF NOT EXISTS cv_volume_issue_ref (
+        volume_id INTEGER NOT NULL,
+        ref_type TEXT NOT NULL,
+        issue_id INTEGER,
+        name TEXT,
+        issue_number TEXT,
+        api_detail_url TEXT,
+        key_order TEXT,
+        PRIMARY KEY (volume_id, ref_type)
+      )
+    `);
+
+    // Add the presence bitmask column to older databases (idempotent).
+    const volumeCols = this.conn.prepare("PRAGMA table_info(cv_volume)").all().map((c) => c.name);
+    if (!volumeCols.includes("credits_presence")) {
+      this.log("  Adding credits_presence column to cv_volume...");
+      try {
+        this.conn.exec("ALTER TABLE cv_volume ADD COLUMN credits_presence INTEGER");
+      } catch (e) {
+        this.log(`  Warning: Could not add credits_presence: ${e.message}`);
+      }
+    }
+
+    const creditCols = volumeCols.filter((c) => c.endsWith("_credits"));
+    const hasFirstLast = volumeCols.includes("first_issue") || volumeCols.includes("last_issue");
+    // Nothing to migrate if the JSON columns are already gone (new schema).
+    if (creditCols.length === 0 && !hasFirstLast) return;
+
+    this.log("  Normalizing volume credits into join tables...");
+    try {
+      const creditTypes = ["character", "concept", "location", "object", "person", "team"];
+      const insertCredit = this.conn.prepare(
+        `INSERT OR REPLACE INTO cv_volume_credit
+           (volume_id, credit_type, position, credit_id, name, count, api_detail_url, site_detail_url)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const insertRef = this.conn.prepare(
+        `INSERT OR REPLACE INTO cv_volume_issue_ref
+           (volume_id, ref_type, issue_id, name, issue_number, api_detail_url, key_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      );
+      const setMask = this.conn.prepare(
+        "UPDATE cv_volume SET credits_presence = ? WHERE id = ?"
+      );
+      const deleteCredits = this.conn.prepare(
+        "DELETE FROM cv_volume_credit WHERE volume_id = ? AND credit_type = ?"
+      );
+      const deleteRef = this.conn.prepare(
+        "DELETE FROM cv_volume_issue_ref WHERE volume_id = ? AND ref_type = ?"
+      );
+
+      // Process in id-ordered batches so memory stays bounded (the DB has ~160k
+      // volumes and ~4M credit rows). The DELETE-then-INSERT per (volume, type)
+      // makes the migration idempotent on re-run.
+      const batchSize = 2000;
+      let minId = null;
+      let migrated = 0;
+      for (;;) {
+        const rows = this.conn.prepare(
+          `SELECT * FROM cv_volume WHERE id > ? ORDER BY id LIMIT ?`
+        ).all(minId ?? 0, batchSize);
+        if (rows.length === 0) break;
+
+        // One transaction per batch keeps the WAL bounded; a failure after a
+        // committed batch is safe because the migration is idempotent (the
+        // DELETE-then-INSERT re-runs cleanly) and the column drop runs only
+        // after every batch has committed.
+        this.conn.exec("BEGIN");
+        for (const row of rows) {
+          let mask = 0;
+          for (let i = 0; i < creditTypes.length; i++) {
+            const type = creditTypes[i];
+            const col = `${type}_credits`;
+            if (!volumeCols.includes(col)) continue;
+            const raw = row[col];
+            if (raw === null || raw === undefined) continue; // null: leave bit 0
+            mask |= 1 << i; // non-null (array, possibly []): set the bit
+            let entries;
+            try {
+              entries = JSON.parse(raw);
+            } catch {
+              continue;
+            }
+            if (!Array.isArray(entries)) continue;
+            deleteCredits.run(row.id, type);
+            entries.forEach((entry, position) => {
+              insertCredit.run(
+                row.id, type, position,
+                entry.id ?? null, entry.name ?? null, entry.count ?? null,
+                entry.api_detail_url ?? null, entry.site_detail_url ?? null
+              );
+            });
+          }
+
+          for (const [field, refType] of [["first_issue", "first"], ["last_issue", "last"]]) {
+            if (!volumeCols.includes(field)) continue;
+            const raw = row[field];
+            deleteRef.run(row.id, refType);
+            if (raw === null || raw === undefined) continue;
+            let ref;
+            try {
+              ref = JSON.parse(raw);
+            } catch {
+              continue;
+            }
+            if (!ref || typeof ref !== "object") continue;
+            insertRef.run(
+              row.id, refType,
+              ref.id ?? null, ref.name ?? null, ref.issue_number ?? null,
+              ref.api_detail_url ?? null, JSON.stringify(Object.keys(ref))
+            );
+          }
+
+          setMask.run(mask, row.id);
+          migrated++;
+        }
+        this.conn.exec("COMMIT");
+
+        minId = rows[rows.length - 1].id;
+        this.log(`  Migrated ${migrated} volumes...`);
+        if (rows.length < batchSize) break;
+      }
+
+      // Drop the now-redundant JSON columns to complete the normalization.
+      const dropNames = [...creditCols];
+      for (const f of ["first_issue", "last_issue"]) if (volumeCols.includes(f)) dropNames.push(f);
+      if (dropNames.length > 0) {
+        this.conn.exec("BEGIN");
+        for (const name of dropNames) {
+          this.conn.exec(`ALTER TABLE cv_volume DROP COLUMN ${name}`);
+        }
+        this.conn.exec("COMMIT");
+      }
+      this.log(`  Normalized volume credits for ${migrated} volumes.`);
+    } catch (e) {
+      try { this.conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
+      this.log(`  Warning: could not normalize volume credits: ${e.message}`, { force: true });
+    }
+  }
+
   ensureMetadataTable() {
     if (!this.conn) return;
     this.conn.exec(`
@@ -564,16 +736,14 @@ class ComicVineUpdater {
         const imageUrl = image ? image.original_url : null;
         const publisher = vol.publisher || null;
         const publisherId = publisher ? publisher.id : null;
-        const firstIssue = vol.first_issue ? JSON.stringify(vol.first_issue) : null;
-        const lastIssue = vol.last_issue ? JSON.stringify(vol.last_issue) : null;
         const exists = this.conn.prepare("SELECT id FROM cv_volume WHERE id = ?").get(volId);
 
         this.conn.prepare(`
           INSERT INTO cv_volume
             (id, name, aliases, start_year, publisher_id, count_of_issues,
              description, image_url, site_detail_url, api_detail_url,
-             deck, date_added, date_last_updated, first_issue, last_issue)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             deck, date_added, date_last_updated)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             aliases = excluded.aliases,
@@ -586,9 +756,7 @@ class ComicVineUpdater {
             api_detail_url = excluded.api_detail_url,
             deck = excluded.deck,
             date_added = excluded.date_added,
-            date_last_updated = excluded.date_last_updated,
-            first_issue = COALESCE(excluded.first_issue, cv_volume.first_issue),
-            last_issue = COALESCE(excluded.last_issue, cv_volume.last_issue)
+            date_last_updated = excluded.date_last_updated
         `).run(
           volId,
           jsonify(vol.name), jsonify(vol.aliases),
@@ -597,8 +765,31 @@ class ComicVineUpdater {
           jsonify(vol.description), imageUrl,
           vol.site_detail_url, vol.api_detail_url,
           jsonify(vol.deck), jsonify(vol.date_added),
-          jsonify(vol.date_last_updated), firstIssue, lastIssue
+          jsonify(vol.date_last_updated)
         );
+
+        // SRV-6c: first/last issue live in the join table (the JSON columns were
+        // dropped by the backfill). Preserve the live API's key order for output.
+        const upsertIssueRef = this.conn.prepare(`
+          INSERT INTO cv_volume_issue_ref
+            (volume_id, ref_type, issue_id, name, issue_number, api_detail_url, key_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(volume_id, ref_type) DO UPDATE SET
+            issue_id = excluded.issue_id,
+            name = excluded.name,
+            issue_number = excluded.issue_number,
+            api_detail_url = excluded.api_detail_url,
+            key_order = excluded.key_order
+        `);
+        for (const [ref, refType] of [[vol.first_issue, "first"], [vol.last_issue, "last"]]) {
+          if (ref && typeof ref === "object") {
+            upsertIssueRef.run(
+              volId, refType,
+              ref.id ?? null, ref.name ?? null, ref.issue_number ?? null,
+              ref.api_detail_url ?? null, JSON.stringify(Object.keys(ref))
+            );
+          }
+        }
 
         if (exists) this.stats.volumes_updated++;
         else this.stats.volumes_added++;
@@ -1007,6 +1198,7 @@ class ComicVineUpdater {
   async runSync(startDate = null) {
     this.ensureMetadataTable();
     this.ensureResourceTables();
+    this.ensureVolumeCreditTables();
 
     const endDate = todayStr();
 

@@ -90,6 +90,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 
 ### Diary
 
+#### 2026-10-29 — Volume credits normalized into join tables (SRV-6c)
+
+- **Context:** volume relationship data (the six `*_credits` arrays, `first_issue`, `last_issue`) was stored as denormalized JSON text on `cv_volume`; SRV-6 is normalizing these into join tables, staged per table with `cv_volume` first.
+- **Change:** added `cv_volume_credit` (one row per credit entry: `volume_id`, `credit_type`, `position`, `credit_id`, `name`, `count`, `api_detail_url`, `site_detail_url`) and `cv_volume_issue_ref` (one row per first/last issue reference, with a `key_order` column recording the emitted key order). A `cv_volume.credits_presence` bitmask distinguishes an empty `[]` from a `null` collection, since the two serialize differently. The updater's `ensureVolumeCreditTables()` backfills the join tables from the JSON columns (id-ordered batches, idempotent) and drops the JSON columns; the server builds volume results from the join tables once the backfill marker (`credits_presence`) is present, and falls back to the JSON columns otherwise.
+- **Gotcha / follow-up:** a key-shape audit of all 154k populated rows showed the credit entries have exactly one key shape (`id→name→count→api_detail_url→site_detail_url`, no `role`, no nulls), but `first_issue`/`last_issue` have **two** historical key-order variants with nullable `name`/`issue_number` — hence the `key_order` column. `team_credits` is always `[]`. Output was verified byte-for-byte identical on a copy of the live DB (41 detail responses + a list). The backfill runs automatically on the next `npm sync`; until then the server uses the JSON path and output is unchanged.
+
 #### 2026-10-29 — Node.js updater port (UPD-3)
 
 - **Context:** the sync updater was Python (`sqlite_cv_updater/sqlite_cv_updater.py`), so running a sync required a Python environment separate from the zero-dependency Node server.

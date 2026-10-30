@@ -105,11 +105,26 @@ erDiagram
         TEXT start_year
         INTEGER publisher_id FK
         INTEGER count_of_issues
-        TEXT character_credits "JSON + count"
-        TEXT person_credits "JSON + count"
-        TEXT team_credits "JSON + count"
-        TEXT first_issue "JSON object"
-        TEXT last_issue "JSON object"
+        INTEGER credits_presence "bitmask: which credit arrays are non-null"
+    }
+    cv_volume_credit {
+        INTEGER volume_id FK
+        TEXT credit_type "character/concept/location/object/person/team"
+        INTEGER position "array order"
+        INTEGER credit_id
+        TEXT name
+        TEXT count
+        TEXT api_detail_url
+        TEXT site_detail_url
+    }
+    cv_volume_issue_ref {
+        INTEGER volume_id FK
+        TEXT ref_type "first/last"
+        INTEGER issue_id
+        TEXT name
+        TEXT issue_number
+        TEXT api_detail_url
+        TEXT key_order "emitted key order, byte-for-byte"
     }
     cv_issue {
         INTEGER id PK
@@ -153,6 +168,8 @@ erDiagram
 
     cv_volume ||--o{ cv_issue : volume_id
     cv_publisher ||--o{ cv_volume : publisher_id
+    cv_volume ||--o{ cv_volume_credit : "SRV-6c"
+    cv_volume ||--o{ cv_volume_issue_ref : "SRV-6c"
     cv_issue }o..o{ cv_person : person_credits
     cv_issue }o..o{ cv_storyarc : story_arc_credits
     cv_issue }o..o{ cv_team : team_credits
@@ -166,7 +183,8 @@ erDiagram
 Notes on the schema:
 
 - `cv_sync_metadata` (endpoint, last_sync_date, last_sync_timestamp, resume_state) tracks updater progress per endpoint — not shown above.
-- Referenced ids inside JSON collections usually do **not** resolve to local rows (the DB is a synced subset), and character/location/object/concept/movie have no local table at all — the denormalized fields inside the JSON are the only source of that data.
+- **`cv_volume` is normalized (SRV-6c):** its credit collections and first/last issue references live in the `cv_volume_credit` / `cv_volume_issue_ref` join tables, not JSON columns (the JSON columns are dropped by the updater backfill). `credits_presence` is a bitmask the server uses to tell an empty `[]` from a `null` collection. The other tables still store their relationships as JSON text (dotted edges) and are staged for the same treatment (SRV-6a/b/d/e/f).
+- Referenced ids inside JSON collections usually do **not** resolve to local rows (the DB is a synced subset), and character/location/object/concept/movie have no local table at all — the denormalized fields inside the JSON are the only source of that data. In `cv_volume_credit` the credit rows likewise keep `name`/`api_detail_url`/`site_detail_url` inline for the same reason.
 - `comicdb_*.db` (raw dumps), dated `localcv-*.db` snapshots, and the FTS tables (`volume_fts*`, `comic_covers`, `comic_files`) are out of scope for the API and excluded here.
 
 ## Notes

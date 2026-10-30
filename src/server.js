@@ -80,6 +80,77 @@ function parseJsonColumn(value) {
   return JSON.parse(value);
 }
 
+// SRV-6c: the six volume credit collections, in a fixed order shared with the
+// updater. Bit i of cv_volume.credits_presence marks whether that collection was a
+// non-null array before the JSON columns were replaced by the cv_volume_credit join
+// table, so the server can distinguish an empty [] from a null collection.
+const VOLUME_CREDIT_TYPES = ["character", "concept", "location", "object", "person", "team"];
+
+// Rebuild a credit entry with the exact key order the live API emitted
+// (id, name, count, api_detail_url, site_detail_url) so serialized output is unchanged.
+function creditRowToObject(row) {
+  return {
+    id: row.credit_id,
+    name: row.name,
+    count: row.count,
+    api_detail_url: row.api_detail_url,
+    site_detail_url: row.site_detail_url
+  };
+}
+
+// Rebuild a first/last issue reference honoring the stored key order, so the two
+// historical key-order variants (id-first vs api_detail_url-first) serialize byte-for-byte.
+function issueRefRowToObject(row) {
+  const values = {
+    id: row.issue_id,
+    name: row.name,
+    issue_number: row.issue_number,
+    api_detail_url: row.api_detail_url
+  };
+  let keys = Object.keys(values);
+  if (row.key_order) {
+    try { keys = JSON.parse(row.key_order); } catch { /* keep the default order */ }
+  }
+  const result = {};
+  for (const key of keys) result[key] = values[key];
+  return result;
+}
+
+// Build a volume result, generating the credit collections and first/last issue
+// references from the SRV-6c join tables. Used only when those tables exist; the
+// JSON-column path in buildResult remains the fallback (e.g. test fixtures).
+function buildVolumeResult(row, database) {
+  const result = buildResult(row, "volume");
+
+  const creditRows = database
+    .prepare("SELECT * FROM cv_volume_credit WHERE volume_id = ? ORDER BY credit_type, position")
+    .all(row.id);
+  const creditsByType = {};
+  for (const credit of creditRows) {
+    (creditsByType[credit.credit_type] ??= []).push(credit);
+  }
+  const mask = row.credits_presence ?? 0;
+  VOLUME_CREDIT_TYPES.forEach((type, i) => {
+    const field = `${type}_credits`;
+    result[field] = mask & (1 << i)
+      ? (creditsByType[type] ?? []).map(creditRowToObject)
+      : null;
+  });
+
+  const refRows = database
+    .prepare("SELECT * FROM cv_volume_issue_ref WHERE volume_id = ?")
+    .all(row.id);
+  for (const field of ["first_issue", "last_issue"]) {
+    const kind = field === "first_issue" ? "first" : "last";
+    const found = refRows.find((r) => r.ref_type === kind);
+    // Match parseJsonColumn: an absent reference is undefined (omitted from JSON),
+    // not null, so the output matches the legacy JSON-column path.
+    result[field] = found ? issueRefRowToObject(found) : undefined;
+  }
+
+  return result;
+}
+
 function buildResult(row, singular) {
   const has = (name) => Object.hasOwn(row, name);
   if (singular === "volume") {
@@ -231,6 +302,7 @@ function buildResourceConfig(database, resource) {
   let alias;
   let from;
   let selectExtra;
+  let build = (row) => buildResult(row, singular);
 
   if (singular === "volume") {
   alias = "v";
@@ -238,6 +310,17 @@ function buildResourceConfig(database, resource) {
   // The volume's publisher is resolved from the shared table when present.
   if (hasPublisherTable && has("publisher_id")) from += " LEFT JOIN cv_publisher ON cv_publisher.id = " + "v.publisher_id";
   selectExtra = `${alias}.*, ${hasPublisherTable ? "cv_publisher.name AS publisher_name" : "NULL AS publisher_name"}`;
+  // SRV-6c: generate the collections from the join tables only once the
+  // backfill has completed. The credits_presence column is added by the
+  // updater at the start of the backfill and is the reliable completion
+  // marker (it survives a rolled-back migration), so its presence means the
+  // JSON columns have been replaced. Otherwise fall back to the JSON-text
+  // columns in buildResult (also the path for test fixtures without join tables).
+  const hasCreditTables =
+    volumeColumns.has("credits_presence") &&
+    tableColumns(database, "cv_volume_credit").size > 0 &&
+    tableColumns(database, "cv_volume_issue_ref").size > 0;
+  if (hasCreditTables) build = (row) => buildVolumeResult(row, database);
   } else if (singular === "team" || singular === "story_arc") {
   alias = singular === "team" ? "t" : "a";
   from = `${resource.table} ${alias}`;
@@ -257,7 +340,7 @@ function buildResourceConfig(database, resource) {
   }
 
   const subquery = `SELECT ${selectExtra} FROM ${from}`;
-  return { subquery, alias, columns, build: (row) => buildResult(row, singular), singular, table: resource.table };
+  return { subquery, alias, columns, build, singular, table: resource.table };
 }
 
 function createResourceMap(database) {
