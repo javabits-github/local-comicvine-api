@@ -5,7 +5,7 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 ## Commands
 
 - `npm start` — run the API server (loads `.env`; defaults to `127.0.0.1:3333`)
-- `npm test` — run the 37 node built-in tests (`node --test`)
+- `npm test` — run the 38 node built-in tests (`node --test`)
 - `python3 sqlite_cv_updater/sqlite_cv_updater.py` — incremental sync from the live API
 - `python3 sqlite_cv_updater/sqlite_cv_updater.py --full` — one-time full sync (thousands of live API calls; no date filter)
 
@@ -34,7 +34,7 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 - ComicVine response envelope: `error`, `limit`, `offset`, `number_of_page_results`, `number_of_total_results`, `status_code`, `results`.
 - Limits: list default 100, search default 10, max 100 (env-overridable). `COMICVINE_FORCED_LIMIT` applies to the **search endpoint only**.
 - Search orders volumes by `start_year DESC` and issues by numeric `issue_number ASC` (non-numeric after).
-- Single-value filters use `LIKE` partial match, **except** volume `id` which is exact match.
+- Text search/filters use a SQLite FTS5 trigram index (`cv_*_fts`, SRV-5) when present, falling back to `LIKE '%value%'` partial match otherwise (shorter values, or a resource without an index). Volume `id` filters are an exact match.
 - Only the volumes endpoint honors `?sort=` (see SRV-1 in `TODO.md`).
 
 ## Conventions and gotchas

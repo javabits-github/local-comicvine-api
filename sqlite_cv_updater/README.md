@@ -281,6 +281,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 
 ### Diary
 
+#### 2026-10-30 — FTS5 trigram search indexes (SRV-5)
+
+- **Context:** the server's search and single-value text filters used `LIKE '%value%'` (a full scan); SRV-5 moves them to a full-text index. This change is mirrored in the Node updater (`src/updater.js`), the primary tool.
+- **Change:** added `ensure_fts_tables()` (creates one FTS5 trigram index per resource — `cv_*_fts` over `name`/`aliases`/`deck`/`description`, external-content keyed on the base table's id) and extended `rebuild_fts_index()` to rebuild all of them after each sync (in addition to the legacy raw-dump `volume_fts`). `run_sync` calls `ensure_fts_tables()`.
+- **Gotcha / follow-up:** the trigram tokenizer is case-insensitive and matches substrings (the same semantics as `LIKE`), but only for values of 3+ characters; the server falls back to `LIKE` for shorter values or when a resource's FTS table is absent/empty. This script is kept for reference — the Node updater (`npm sync`) is the tool to run.
+
 #### 2026-10-29 — Superseded by the Node.js updater (UPD-3)
 
 - **Context:** the project goal is a zero-dependency Node.js server, and a Python updater forced a second runtime for syncing.

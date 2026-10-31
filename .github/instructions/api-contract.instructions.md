@@ -43,8 +43,15 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 
 - Comma-separated `field:value` terms; `field:start|end` is an inclusive range.
 - Single values are `LIKE '%value%' COLLATE NOCASE`, **except volume `id` which is exact `=` match**.
+- **SRV-5:** a single-value text field (`name`/`aliases`/`deck`/`description`) is matched against the resource's FTS5 trigram index (`ftsOrLike`) when that index exists and the value is ≥ 3 characters; otherwise it falls back to the `LIKE` clause above.
 - Issue `volume`/`volume_id` filters resolve to the joined volume id (accepts `4050-7300` or bare number).
 - Unknown fields match nothing (`1 = 0`); malformed filters → 400.
+
+## Search (SRV-5)
+
+- Each searchable resource matches on its **name** column only. When the resource has a populated FTS5 trigram table (`cv_*_fts`, created by the updater) the query runs as a trigram `MATCH` (`ftsOrLike`); otherwise it falls back to `LIKE lower(?) ESCAPE '\\' COLLATE NOCASE`.
+- The trigram tokenizer is case-insensitive and matches substrings (≥ 3 chars), so the result set matches the legacy `LIKE` behavior; shorter queries always use `LIKE`.
+- `buildResourceConfig` detects each `cv_*_fts` table and exposes `config.ftsTable`/`config.ftsColumns`; an absent or empty index (`COUNT(*) = 0`) disables FTS for that resource, so test fixtures without FTS tables are unaffected.
 
 ## Per-resource special cases (buildResult / buildResourceConfig)
 
@@ -60,4 +67,4 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 
 ## Validation when changing this file
 
-Run `npm test` (37 tests) — the suite in `test/server.test.js` pins the envelope, field_list, filter, sort, and forced-limit behavior.
+Run `npm test` (38 tests) — the suite in `test/server.test.js` pins the envelope, field_list, filter, sort, forced-limit, and FTS search behavior.

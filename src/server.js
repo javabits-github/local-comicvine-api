@@ -288,6 +288,28 @@ function columnExpression(config, field) {
   return { kind: "none" };
 }
 
+// SRV-5: build a text-match clause for a single-value field. When the resource
+// has an FTS5 trigram table covering the field, return an `id IN (SELECT rowid
+// FROM ..._fts WHERE ..._fts MATCH ...)` clause; otherwise return null so the
+// caller keeps the legacy `LIKE '%value%'` behavior. The trigram tokenizer is
+// case-insensitive and matches substrings — the same semantics as the LIKE path
+// — but only for values of at least 3 characters, so shorter values fall back
+// to LIKE. NULL values match nothing; the column must exist in both the table
+// and the FTS index.
+const FTS_TEXT_FIELDS = new Set(["name", "aliases", "deck", "description"]);
+function ftsOrLike(config, field, value) {
+  const lower = field.toLowerCase();
+  if (value === null || value === undefined) return null;
+  const text = String(value);
+  if (config.ftsTable && config.ftsColumns.has(lower) && FTS_TEXT_FIELDS.has(lower) && text.length >= 3) {
+    // FTS5 column filter: <column>:<phrase>, where the phrase is a quoted string
+    // (embedded double-quotes doubled) so it matches as a single substring.
+    const match = `${lower}:"${text.replace(/"/g, '""')}"`;
+    return { clause: `${config.alias}.id IN (SELECT rowid FROM ${config.ftsTable} WHERE ${config.ftsTable} MATCH ?)`, values: [match] };
+  }
+  return null;
+}
+
 // Build the resource's SQL subquery, its column alias, the set of primary columns,
 // and a JS row-to-result projector. Only resources with a normalized table are
 // configured; resources without one return null so their endpoints report 404.
@@ -340,7 +362,19 @@ function buildResourceConfig(database, resource) {
   }
 
   const subquery = `SELECT ${selectExtra} FROM ${from}`;
-  return { subquery, alias, columns, build, singular, table: resource.table };
+  // SRV-5: detect the resource's FTS5 trigram table (created by the updater).
+  // It must exist, cover the searchable text columns, and be populated; any of
+  // those missing means the resource falls back to LIKE matching. The FTS table
+  // is external-content, so its row count tracks the base table only after a
+  // rebuild — gate on > 0 so an empty index does not silently match nothing.
+  const ftsTable = `${resource.table}_fts`;
+  const ftsColumns = tableColumns(database, ftsTable);
+  let ftsEnabled = false;
+  if (ftsColumns.size > 0) {
+    try { ftsEnabled = database.prepare(`SELECT COUNT(*) AS count FROM ${ftsTable}`).get().count > 0; }
+    catch { ftsEnabled = false; }
+  }
+  return { subquery, alias, columns, build, singular, table: resource.table, ftsTable: ftsEnabled ? ftsTable : null, ftsColumns };
 }
 
 function createResourceMap(database) {
@@ -474,8 +508,16 @@ function parseFilters(filter, config) {
     clauses.push(`${column} = ?`);
     values.push(match[2].trim());
    } else {
-    clauses.push(`${column} LIKE ? COLLATE NOCASE`);
-    values.push(`%${match[2]}%`);
+    // SRV-5: single-value text filters use the FTS trigram index when available;
+    // shorter values (< 3 chars) and non-text fields keep the LIKE partial match.
+    const ftsMatch = ftsOrLike(config, field, match[2]);
+    if (ftsMatch) {
+      clauses.push(ftsMatch.clause);
+      values.push(...ftsMatch.values);
+    } else {
+      clauses.push(`${column} LIKE ? COLLATE NOCASE`);
+      values.push(`%${match[2]}%`);
+    }
    }
    }
 
@@ -734,7 +776,7 @@ function createApiServer(
       let tables = {};
       try {
         const rows = database.prepare(
-          `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cv\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%' ORDER BY name`
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cv\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%\\_fts' ESCAPE '\\' ORDER BY name`
         ).all();
         for (const row of rows) {
           tables[row.name] = database.prepare(`SELECT COUNT(*) AS count FROM ${row.name}`).get().count;
@@ -797,6 +839,13 @@ function createApiServer(
         let total = 0;
         for (const resource of selectedResources.filter((resource) => resource.config)) {
          const config = resource.config;
+        // SRV-5: token-based FTS match when the resource has a populated trigram
+        // index; otherwise the legacy case-insensitive LIKE on name. Both match
+        // the name column only, so the result set is unchanged.
+        const ftsMatch = ftsOrLike(config, "name", query);
+        const nameMatch = ftsMatch
+          ? ftsMatch
+          : { clause: `${config.alias}.name LIKE lower(?) ESCAPE '\\' COLLATE NOCASE`, values: [pattern] };
         // Volumes lead with the newest first; issues by issue number (numeric,
         // since it is stored as text, with non-numeric specials after the
         // numbers); other resources keep id order.
@@ -815,8 +864,8 @@ function createApiServer(
           ? publisherBlocklistPredicate(config, publisherBlocklist)
           : { clause: "", values: [] };
         const matched = database.prepare(
-          `SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${config.alias}.name LIKE lower(?) ESCAPE '\\' COLLATE NOCASE${blocklist.clause} ORDER BY ${orderBy}`
-           ).all(pattern, ...blocklist.values);
+          `SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${nameMatch.clause}${blocklist.clause} ORDER BY ${orderBy}`
+           ).all(...nameMatch.values, ...blocklist.values);
         total += matched.length;
         for (const row of matched) allResults.push(projectSearchFields(resource, config.build(row), url.searchParams.get("field_list")));
         }

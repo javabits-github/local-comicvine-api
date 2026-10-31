@@ -368,6 +368,61 @@ class ComicVineUpdater {
     }
   }
 
+  // ─── SRV-5: FTS5 full-text search indexes ────────────────────────────────
+
+  // The six resource tables, in the order the server searches them. Each is
+  // indexed on the searchable text columns (name, aliases, deck, description);
+  // the trigram tokenizer is case-insensitive and matches substrings, which is
+  // the same semantics the server's legacy LIKE matching used (SRV-5).
+  get FTS_RESOURCES() {
+    return [
+      { table: "cv_publisher", fts: "cv_publisher_fts" },
+      { table: "cv_person", fts: "cv_person_fts" },
+      { table: "cv_volume", fts: "cv_volume_fts" },
+      { table: "cv_issue", fts: "cv_issue_fts" },
+      { table: "cv_team", fts: "cv_team_fts" },
+      { table: "cv_storyarc", fts: "cv_storyarc_fts" }
+    ];
+  }
+
+  // Create the per-resource FTS5 trigram tables (external-content, keyed on the
+  // base table's id/rowid). Idempotent: only creates a table if it is missing.
+  // Only the text columns that actually exist on the base table are indexed.
+  ensureFtsTables() {
+    if (!this.conn) return;
+    for (const { table, fts } of this.FTS_RESOURCES) {
+      let exists;
+      try {
+        exists = this.conn.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+        ).get(table)?.name;
+      } catch {
+        exists = null;
+      }
+      if (!exists) continue; // base resource table absent (e.g. minimal DB)
+
+      const baseColumns = this.conn.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+      if (!baseColumns.includes("id")) continue;
+      const columns = ["name", "aliases", "deck", "description"].filter((c) => baseColumns.includes(c));
+      if (columns.length === 0) continue;
+
+      const ftsExists = this.conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+      ).get(fts)?.name;
+      if (ftsExists) continue; // already created; rebuilt in rebuildFtsIndex
+
+      try {
+        this.conn.exec(
+          `CREATE VIRTUAL TABLE ${fts} USING fts5(${columns.join(", ")}, ` +
+          `content='${table}', content_rowid='id', tokenize='trigram case_sensitive 0')`
+        );
+        this.log(`  Created ${fts} (${columns.join(", ")})`);
+      } catch (e) {
+        this.log(`  Warning: could not create ${fts}: ${e.message}`);
+      }
+    }
+  }
+
   ensureMetadataTable() {
     if (!this.conn) return;
     this.conn.exec(`
@@ -1160,18 +1215,32 @@ class ComicVineUpdater {
     this.log("\n--- Rebuilding Search Index ---");
     if (!this.conn) return;
 
+    // SRV-5: rebuild every per-resource FTS5 trigram index from the base tables.
+    for (const { fts } of this.FTS_RESOURCES) {
+      try {
+        const exists = this.conn.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+        ).get(fts);
+        if (exists) {
+          this.conn.exec(`INSERT INTO ${fts}(${fts}) VALUES('rebuild')`);
+          this.log(`  ${fts} rebuilt`);
+        }
+      } catch (e) {
+        this.log(`  Warning: could not rebuild ${fts}: ${e.message}`);
+      }
+    }
+
+    // Legacy raw-dump index (out of scope for the API, but kept in sync).
     try {
       const row = this.conn.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='volume_fts'"
       ).get();
       if (row) {
         this.conn.exec("INSERT INTO volume_fts(volume_fts) VALUES('rebuild')");
-        this.log("  FTS index rebuilt");
-      } else {
-        this.log("  FTS index not found, skipping");
+        this.log("  volume_fts rebuilt");
       }
     } catch (e) {
-      this.log(`  Warning: Could not rebuild FTS index: ${e.message}`);
+      this.log(`  Warning: Could not rebuild volume_fts: ${e.message}`);
     }
   }
 
@@ -1199,6 +1268,7 @@ class ComicVineUpdater {
     this.ensureMetadataTable();
     this.ensureResourceTables();
     this.ensureVolumeCreditTables();
+    this.ensureFtsTables();
 
     const endDate = todayStr();
 

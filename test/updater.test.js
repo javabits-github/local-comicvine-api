@@ -212,6 +212,14 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.ok(meta);
   assert.ok(meta.last_sync_date);
 
+  // SRV-5: runSync creates an FTS5 trigram index for each resource table and
+  // rebuilds it after the sync, so the indexes are populated with the new rows.
+  const ftsTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts' ORDER BY name").all().map((r) => r.name);
+  assert.ok(ftsTables.includes("cv_volume_fts"), `expected cv_volume_fts, got ${ftsTables.join(", ")}`);
+  assert.ok(ftsTables.includes("cv_issue_fts"));
+  const ftsRows = db.prepare("SELECT COUNT(*) AS c FROM cv_volume_fts").get().c;
+  assert.ok(ftsRows >= 1, `expected cv_volume_fts to be populated, got ${ftsRows}`);
+
   db.close();
   assert.ok(calls.length > 0, "API calls were made");
 });

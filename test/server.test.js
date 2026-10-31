@@ -138,6 +138,58 @@ test("search supports the documented formats, default limit, and all resource op
   assert.equal(jsonpResult.number_of_total_results, 0);
 });
 
+test("searches and filters text fields against the FTS trigram index", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-fts-test-"));
+  const ftsDatabasePath = path.join(directory, "fts.db");
+  const ftsDatabase = new DatabaseSync(ftsDatabasePath);
+  ftsDatabase.exec("CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, image_url TEXT, site_detail_url TEXT, aliases TEXT, deck TEXT, description TEXT)");
+  ftsDatabase.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, image_url TEXT, site_detail_url TEXT, api_detail_url TEXT, date_added TEXT, date_last_updated TEXT)");
+  ftsDatabase.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT)");
+  ftsDatabase.prepare("INSERT INTO cv_volume (id, name, aliases, deck, description, start_year, count_of_issues) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "Witchblade", "Witchblade (1995)", "A supernatural series", "long description", "1995", 185);
+  ftsDatabase.prepare("INSERT INTO cv_volume (id, name, deck, description) VALUES (?, ?, ?, ?)")
+      .run(2, "Dune", "deck with batman", "desc");
+  ftsDatabase.prepare("INSERT INTO cv_issue (id, volume_id, name, issue_number, description) VALUES (?, ?, ?, ?, ?)")
+      .run(10, 1, "The Test Issue", "1", "");
+  // SRV-5: the trigram FTS indexes the server detects and uses for search/filter.
+  ftsDatabase.exec("CREATE VIRTUAL TABLE cv_volume_fts USING fts5(name, aliases, deck, description, content='cv_volume', content_rowid='id', tokenize='trigram case_sensitive 0')");
+  ftsDatabase.exec("CREATE VIRTUAL TABLE cv_issue_fts USING fts5(name, description, content='cv_issue', content_rowid='id', tokenize='trigram case_sensitive 0')");
+  ftsDatabase.exec("INSERT INTO cv_volume_fts(cv_volume_fts) VALUES('rebuild')");
+  ftsDatabase.exec("INSERT INTO cv_issue_fts(cv_issue_fts) VALUES('rebuild')");
+  ftsDatabase.close();
+
+  const ftsServer = createApiServer(ftsDatabasePath, () => {});
+  await new Promise((resolve) => ftsServer.listen(0, "127.0.0.1", resolve));
+  const ftsUrl = `http://127.0.0.1:${ftsServer.address().port}`;
+
+  try {
+    // Search is case-insensitive and matches the name column only (a substring).
+    const search = await (await fetch(`${ftsUrl}/api/search/?query=witchblade&resources=volume`)).json();
+    assert.equal(search.number_of_total_results, 1);
+    assert.equal(search.results[0].id, 1);
+
+    // A query that only appears in a non-name field must not match (search is name-only).
+    const deckOnlySearch = await (await fetch(`${ftsUrl}/api/search/?query=batman&resources=volume`)).json();
+    assert.equal(deckOnlySearch.number_of_total_results, 0);
+
+    // A single-value text filter uses the FTS index (deck substring, both case-insensitive).
+    const filtered = await (await fetch(`${ftsUrl}/api/volumes?filter=deck:batman&field_list=id`)).json();
+    assert.deepEqual(filtered.results.map((result) => result.id), [2]);
+
+    // A value shorter than the trigram minimum falls back to LIKE and still matches.
+    const short = await (await fetch(`${ftsUrl}/api/volumes?filter=name:Du&field_list=id`)).json();
+    assert.deepEqual(short.results.map((result) => result.id), [2]);
+
+    // Issue search via its own FTS index.
+    const issueSearch = await (await fetch(`${ftsUrl}/api/search/?query=Test%20Issue&resources=issue`)).json();
+    assert.equal(issueSearch.number_of_total_results, 1);
+    assert.equal(issueSearch.results[0].id, 10);
+  } finally {
+    await new Promise((resolve) => ftsServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("supports volume field selection, sorting, and date range filters", async () => {
   const sorted = await fetch(`${baseUrl}/api/volumes?sort=name:desc&limit=1&field_list=id,name`);
   const sortedBody = await sorted.json();

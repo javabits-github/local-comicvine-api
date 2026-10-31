@@ -250,6 +250,58 @@ class ComicVineUpdater:
             )
         self.conn.commit()
 
+    # SRV-5: the six resource tables, in search order. Each is indexed on the
+    # searchable text columns (name, aliases, deck, description); the trigram
+    # tokenizer is case-insensitive and matches substrings, the same semantics
+    # the server's legacy LIKE matching used.
+    FTS_RESOURCES = [
+        ("cv_publisher", "cv_publisher_fts"),
+        ("cv_person", "cv_person_fts"),
+        ("cv_volume", "cv_volume_fts"),
+        ("cv_issue", "cv_issue_fts"),
+        ("cv_team", "cv_team_fts"),
+        ("cv_storyarc", "cv_storyarc_fts"),
+    ]
+
+    def ensure_fts_tables(self) -> None:
+        """Create the per-resource FTS5 trigram tables (idempotent).
+
+        Each index is external-content, keyed on the base table's id/rowid, and
+        covers only the text columns that actually exist on that table. Only the
+        tables the server searches are created; the legacy raw-dump ``volume_fts``
+        is left alone (rebuilt by ``rebuild_fts_index``).
+        """
+        if not self.conn:
+            return
+        for table, fts in self.FTS_RESOURCES:
+            row = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not row:
+                continue  # base resource table absent (e.g. minimal DB)
+            base_columns = {c[1] for c in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "id" not in base_columns:
+                continue
+            columns = [c for c in ("name", "aliases", "deck", "description") if c in base_columns]
+            if not columns:
+                continue
+            exists = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (fts,),
+            ).fetchone()
+            if exists:
+                continue  # already created; rebuilt in rebuild_fts_index
+            try:
+                self.conn.execute(
+                    f"CREATE VIRTUAL TABLE {fts} USING fts5("
+                    f"{', '.join(columns)}, content='{table}', "
+                    f"content_rowid='id', tokenize='trigram case_sensitive 0')"
+                )
+                self.log(f"  Created {fts} ({', '.join(columns)})")
+            except sqlite3.Error as e:
+                self.log(f"  Warning: could not create {fts}: {e}")
+
     def ensure_metadata_table(self) -> None:
         """Create metadata table if it doesn't exist."""
         if not self.conn:
@@ -1317,24 +1369,38 @@ class ComicVineUpdater:
             self.log(f"  Error recalculating counts: {e}")
 
     def rebuild_fts_index(self) -> None:
-        """Rebuild the FTS5 full-text search index."""
+        """Rebuild the FTS5 full-text search indexes."""
         self.log("\n--- Rebuilding Search Index ---")
         if not self.conn:
             return
 
+        # SRV-5: rebuild every per-resource FTS5 trigram index from the base tables.
+        for _table, fts in self.FTS_RESOURCES:
+            try:
+                exists = self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (fts,),
+                ).fetchone()
+                if exists:
+                    self.conn.execute(f"INSERT INTO {fts}({fts}) VALUES('rebuild')")
+                    self.log(f"  {fts} rebuilt")
+            except sqlite3.Error as e:
+                self.log(f"  Warning: could not rebuild {fts}: {e}")
+        self.conn.commit()
+
+        # Legacy raw-dump index (out of scope for the API, but kept in sync).
         try:
-            # Check if FTS table exists
             cur = self.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='volume_fts'"
             )
             if cur.fetchone():
                 self.conn.execute("INSERT INTO volume_fts(volume_fts) VALUES('rebuild')")
                 self.conn.commit()
-                self.log("  FTS index rebuilt")
+                self.log("  volume_fts rebuilt")
             else:
-                self.log("  FTS index not found, skipping")
+                self.log("  volume_fts not found, skipping")
         except sqlite3.Error as e:
-            self.log(f"  Warning: Could not rebuild FTS index: {e}")
+            self.log(f"  Warning: Could not rebuild volume_fts: {e}")
 
     def print_stats(self) -> None:
         """Print sync statistics."""
@@ -1361,7 +1427,9 @@ class ComicVineUpdater:
         self.ensure_metadata_table()
         # Ensure cv_team / cv_storyarc tables exist
         self.ensure_resource_tables()
-        
+        # Ensure SRV-5 FTS5 trigram tables exist (rebuilt after the sync below)
+        self.ensure_fts_tables()
+
         # Determine end date (always today)
         end_date = datetime.now().strftime("%Y-%m-%d")
         

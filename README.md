@@ -106,6 +106,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 
 ### Diary
 
+#### 2026-10-30 — Full-text search (SRV-5)
+
+- **Context:** search and single-value text filters matched with `LIKE '%value%'`, a full table scan. The task was to move to a SQLite full-text index for faster, token-based search (SRV-5), which also supersedes the open SRV-4 question about `LIKE` semantics.
+- **Change:** the updater now creates one FTS5 trigram index per resource — `cv_*_fts` over `name`/`aliases`/`deck`/`description` (external-content, keyed on the base table's id) — in `ensureFtsTables()` (Node [src/updater.js](src/updater.js) and Python [sqlite_cv_updater/sqlite_cv_updater.py](sqlite_cv_updater/sqlite_cv_updater.py)) and rebuilds them in `rebuildFtsIndex()` after each sync. The server (`buildResourceConfig` in [src/server.js](src/server.js)) detects each `cv_*_fts` table and, via `ftsOrLike()`, runs search (on `name`) and single-value text filters against the index. The trigram tokenizer is case-insensitive and matches substrings, so the result set is unchanged relative to the old `LIKE`.
+- **Gotcha / follow-up:** the trigram tokenizer only matches values of **3+ characters**, so `ftsOrLike()` falls back to the legacy `LIKE` clause for shorter values and for any resource whose FTS table is absent or empty (`COUNT(*) = 0`) — this keeps test fixtures and pre-upgrade databases on the `LIKE` path. `/api/status` excludes the `cv_*_fts` tables from its table listing. Run a sync after upgrading to populate the indexes; until then the server transparently uses `LIKE`.
+
 #### 2026-10-30 — Node.js 26 upgrade
 
 - **Context:** the development machine was upgraded to Node.js 26.13.0.
