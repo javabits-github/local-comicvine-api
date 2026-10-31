@@ -17,7 +17,7 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 
 ## The data contract (most common source of bugs)
 
-- Relationship/credit columns in the DB are **JSON text**: arrays of `{id, name, api_detail_url, site_detail_url}` (plus `role` for person credits, `count` for volume credits), or JSON objects for scalar refs (`death`, `birth`, `publisher`, `first_issue`, `last_issue`, `first_appeared_in_issue`).
+- Relationship/credit columns in the DB are **JSON text**: arrays of `{id, name, api_detail_url, site_detail_url}` (plus `role` for person credits, `count` for volume credits), or JSON objects for scalar refs (`death`, `birth`, `publisher`, `first_appeared_in_issue`). **Exception (SRV-6c):** `cv_volume`'s `first_issue`/`last_issue` are normalized into the `cv_volume_issue_ref` join table (`issue_id` FK + `key_order`; display fields resolved via `LEFT JOIN cv_issue`), and its six credit arrays into `cv_volume_credit` — the JSON columns are dropped after the updater backfill.
 - The live API returns dict/list values for fields like `death`, `birth`, `publisher`, `gender` in **~14% of records**. Python `sqlite3` cannot bind dicts — every bound value in the updater goes through `_jsonify()` (dict/list → `json.dumps(ensure_ascii=False)`, else pass-through). Never add a new upsert without `_jsonify` on every bound value.
 - The server parses these with `parseJsonColumn`/`parseCredits` in JS; SQL never parses JSON.
 - `localcv.db` is a synced **subset**, not the full universe: ids referenced inside JSON collections usually do NOT resolve to local rows, and entities like character/location/object/concept/movie have no local table at all. The denormalized fields inside the JSON are the only source of that data.

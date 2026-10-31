@@ -120,10 +120,7 @@ erDiagram
     cv_volume_issue_ref {
         INTEGER volume_id FK
         TEXT ref_type "first/last"
-        INTEGER issue_id
-        TEXT name
-        TEXT issue_number
-        TEXT api_detail_url
+        INTEGER issue_id FK "resolves to cv_issue"
         TEXT key_order "emitted key order, byte-for-byte"
     }
     cv_issue {
@@ -170,6 +167,7 @@ erDiagram
     cv_publisher ||--o{ cv_volume : publisher_id
     cv_volume ||--o{ cv_volume_credit : "SRV-6c"
     cv_volume ||--o{ cv_volume_issue_ref : "SRV-6c"
+    cv_issue ||--o{ cv_volume_issue_ref : "first/last issue"
     cv_issue }o..o{ cv_person : person_credits
     cv_issue }o..o{ cv_storyarc : story_arc_credits
     cv_issue }o..o{ cv_team : team_credits
@@ -184,6 +182,7 @@ Notes on the schema:
 
 - `cv_sync_metadata` (endpoint, last_sync_date, last_sync_timestamp, resume_state) tracks updater progress per endpoint — not shown above.
 - **`cv_volume` is normalized (SRV-6c):** its credit collections and first/last issue references live in the `cv_volume_credit` / `cv_volume_issue_ref` join tables, not JSON columns (the JSON columns are dropped by the updater backfill). `credits_presence` is a bitmask the server uses to tell an empty `[]` from a `null` collection. The other tables still store their relationships as JSON text (dotted edges) and are staged for the same treatment (SRV-6a/b/d/e/f).
+- **`cv_volume_issue_ref` is a true join to `cv_issue`:** it stores only the issue `id` (FK) and the emitted `key_order`; the server resolves `name`/`issue_number`/`api_detail_url` by joining `cv_issue`. Unlike the credit entities (no local table), issues *do* have a local table, so the denormalized snapshot is not needed. A `LEFT JOIN` keeps a ref whose issue id isn't in the (synced-subset) `cv_issue` table, emitting the id with `null` display fields.
 - Referenced ids inside JSON collections usually do **not** resolve to local rows (the DB is a synced subset), and character/location/object/concept/movie have no local table at all — the denormalized fields inside the JSON are the only source of that data. In `cv_volume_credit` the credit rows likewise keep `name`/`api_detail_url`/`site_detail_url` inline for the same reason.
 - `comicdb_*.db` (raw dumps), dated `localcv-*.db` snapshots, and the FTS tables (`volume_fts*`, `comic_covers`, `comic_files`) are out of scope for the API and excluded here.
 

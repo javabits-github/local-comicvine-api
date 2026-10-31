@@ -130,6 +130,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 - **Change:** added a single `node:22-slim` [Dockerfile](Dockerfile) that runs **both** the server (default `CMD npm start`) and the updater (`npm run sync -- --db /data/localcv.db`) from one image, plus a [.dockerignore](.dockerignore) and a [docker-compose.yml](docker-compose.yml) with `server` / `sync` / `sync-full` services.
 - **Gotcha / follow-up:** because both tools are the same runtime, one image is enough — no multi-stage or separate Python image is needed. The DB is provided as a host volume at `/data` (never built into the image), so the image stays small and portable; the same volume is shared between the server and sync services so a sync's writes are visible to the running server.
 
+#### 2026-10-30 — First/last issue refs become a true join to `cv_issue` (SRV-6c)
+
+- **Context:** `cv_volume_issue_ref` (from the SRV-6c backfill) stored the issue id *plus* a denormalized snapshot of `name`/`issue_number`/`api_detail_url`. Because issues — unlike the credit entities — have a local `cv_issue` table, the snapshot is redundant; the ref should just reference the issue row.
+- **Change:** reduced `cv_volume_issue_ref` to `volume_id`, `ref_type`, `issue_id` (FK to `cv_issue`), and `key_order`, dropping the three snapshot columns (the updater drops them if an older table still has them). The server now resolves the display fields with `LEFT JOIN cv_issue ON i.id = r.issue_id`. The Node updater's backfill and `syncVolumes` upsert write only the id + key order.
+- **Gotcha / follow-up:** the live API's first/last issue ids don't always resolve to a local `cv_issue` row (the DB is a synced subset — ~2.2% of refs are dangling). A `LEFT JOIN` keeps those refs, emitting the id with `null` display fields; this is the intended behavior for now (a dangling ref was previously fully denormalized). The Python updater is unaffected — it predates the join tables and still stores `first_issue`/`last_issue` as JSON.
+
 #### 2026-10-29 — Volume credits normalized into join tables (SRV-6c)
 
 - **Context:** volume relationship data (the six `*_credits` arrays, `first_issue`, `last_issue`) was stored as denormalized JSON text on `cv_volume`; SRV-6 is normalizing these into join tables, staged per table with `cv_volume` first.

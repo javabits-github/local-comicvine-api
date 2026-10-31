@@ -180,13 +180,13 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   const vol = db.prepare("SELECT * FROM cv_volume WHERE id=300").get();
   assert.equal(vol.publisher_id, 100);
   assert.equal(vol.name, "Test Series");
-  // SRV-6c: first/last issue live in the join table, not the (dropped) JSON columns.
+  // SRV-6c: first/last issue live in the join table, not the (dropped) JSON
+  // columns. The ref row stores only the issue id + key order (display fields
+  // are resolved from cv_issue on read), so it has no name/issue_number columns.
   const firstRef = db.prepare("SELECT * FROM cv_volume_issue_ref WHERE volume_id=300 AND ref_type='first'").get();
   assert.equal(firstRef.issue_id, 4001);
-  assert.equal(firstRef.name, "Test Series #1");
   const lastRef = db.prepare("SELECT * FROM cv_volume_issue_ref WHERE volume_id=300 AND ref_type='last'").get();
   assert.equal(lastRef.issue_id, 4010);
-  assert.equal(lastRef.name, "Test Series #10");
 
   // Issues (2 fetched via detail endpoint)
   const issues = db.prepare("SELECT * FROM cv_issue ORDER BY id").all();

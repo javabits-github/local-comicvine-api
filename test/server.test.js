@@ -190,6 +190,47 @@ test("searches and filters text fields against the FTS trigram index", async () 
   }
 });
 
+test("builds volume first/last issue refs from the cv_issue join (SRV-6c)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-join-test-"));
+  const joinDatabasePath = path.join(directory, "join.db");
+  const joinDatabase = new DatabaseSync(joinDatabasePath);
+  joinDatabase.exec("CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT)");
+  joinDatabase.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, credits_presence INTEGER)");
+  joinDatabase.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, api_detail_url TEXT)");
+  joinDatabase.exec("CREATE TABLE cv_volume_credit (volume_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, count TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (volume_id, credit_type, position))");
+  joinDatabase.exec("CREATE TABLE cv_volume_issue_ref (volume_id INTEGER NOT NULL, ref_type TEXT NOT NULL, issue_id INTEGER, key_order TEXT, PRIMARY KEY (volume_id, ref_type))");
+  joinDatabase.prepare("INSERT INTO cv_volume (id, name, start_year, count_of_issues, credits_presence) VALUES (?, ?, ?, ?, ?)")
+      .run(1, "Witchblade", "1995", 2, 0);
+  // Issue 10 exists locally (resolves); issue 99 does not (dangling ref).
+  joinDatabase.prepare("INSERT INTO cv_issue (id, volume_id, name, issue_number, api_detail_url) VALUES (?, ?, ?, ?, ?)")
+      .run(10, 1, "Witchblade #1", "1", "https://example.test/issue/4000-10/");
+  // first_issue → 10 (resolves, id-first key order); last_issue → 99 (dangling).
+  joinDatabase.prepare("INSERT INTO cv_volume_issue_ref (volume_id, ref_type, issue_id, key_order) VALUES (?, ?, ?, ?)")
+      .run(1, "first", 10, JSON.stringify(["id", "name", "issue_number", "api_detail_url"]));
+  joinDatabase.prepare("INSERT INTO cv_volume_issue_ref (volume_id, ref_type, issue_id, key_order) VALUES (?, ?, ?, ?)")
+      .run(1, "last", 99, JSON.stringify(["id", "name", "issue_number", "api_detail_url"]));
+  joinDatabase.close();
+
+  const joinServer = createApiServer(joinDatabasePath, () => {});
+  await new Promise((resolve) => joinServer.listen(0, "127.0.0.1", resolve));
+  const joinUrl = `http://127.0.0.1:${joinServer.address().port}`;
+
+  try {
+    const detail = await (await fetch(`${joinUrl}/api/volume/4050-1/`)).json();
+    const result = detail.results;
+
+    // Resolving ref: display fields come from the joined cv_issue row.
+    assert.deepEqual(result.first_issue, {
+      id: 10, name: "Witchblade #1", issue_number: "1", api_detail_url: "https://example.test/issue/4000-10/"
+    });
+    // Dangling ref: the id is still emitted, joined fields are null.
+    assert.deepEqual(result.last_issue, { id: 99, name: null, issue_number: null, api_detail_url: null });
+  } finally {
+    await new Promise((resolve) => joinServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("supports volume field selection, sorting, and date range filters", async () => {
   const sorted = await fetch(`${baseUrl}/api/volumes?sort=name:desc&limit=1&field_list=id,name`);
   const sortedBody = await sorted.json();

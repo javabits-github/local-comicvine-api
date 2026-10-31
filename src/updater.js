@@ -202,7 +202,9 @@ class ComicVineUpdater {
   // stored as JSON text on cv_volume. This method normalizes them into join
   // tables so the server can generate the collections directly:
   //   - cv_volume_credit: one row per credit entry (credit_type + position).
-  //   - cv_volume_issue_ref: one row per first/last issue reference.
+  //   - cv_volume_issue_ref: one row per first/last issue reference, a true
+  //     join to cv_issue (stores only the issue id + the emitted key order; the
+  //     display fields are resolved from the issue row on read).
   //   - cv_volume.credits_presence: a bitmask (bit i = credit type i) that
   //     distinguishes an empty [] collection from a null one.
   // It backfills the join tables from the JSON columns and then drops those
@@ -232,13 +234,18 @@ class ComicVineUpdater {
         volume_id INTEGER NOT NULL,
         ref_type TEXT NOT NULL,
         issue_id INTEGER,
-        name TEXT,
-        issue_number TEXT,
-        api_detail_url TEXT,
         key_order TEXT,
         PRIMARY KEY (volume_id, ref_type)
       )
     `);
+    // SRV-6c: drop the denormalized snapshot columns if an older version of the
+    // table still carries them (the display fields now come from cv_issue).
+    for (const col of ["name", "issue_number", "api_detail_url"]) {
+      const cols = this.conn.prepare("PRAGMA table_info(cv_volume_issue_ref)").all().map((c) => c.name);
+      if (cols.includes(col)) {
+        try { this.conn.exec(`ALTER TABLE cv_volume_issue_ref DROP COLUMN ${col}`); } catch { /* ignore */ }
+      }
+    }
 
     // Add the presence bitmask column to older databases (idempotent).
     const volumeCols = this.conn.prepare("PRAGMA table_info(cv_volume)").all().map((c) => c.name);
@@ -266,8 +273,8 @@ class ComicVineUpdater {
       );
       const insertRef = this.conn.prepare(
         `INSERT OR REPLACE INTO cv_volume_issue_ref
-           (volume_id, ref_type, issue_id, name, issue_number, api_detail_url, key_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+           (volume_id, ref_type, issue_id, key_order)
+         VALUES (?, ?, ?, ?)`
       );
       const setMask = this.conn.prepare(
         "UPDATE cv_volume SET credits_presence = ? WHERE id = ?"
@@ -336,8 +343,7 @@ class ComicVineUpdater {
             if (!ref || typeof ref !== "object") continue;
             insertRef.run(
               row.id, refType,
-              ref.id ?? null, ref.name ?? null, ref.issue_number ?? null,
-              ref.api_detail_url ?? null, JSON.stringify(Object.keys(ref))
+              ref.id ?? null, JSON.stringify(Object.keys(ref))
             );
           }
 
@@ -827,21 +833,17 @@ class ComicVineUpdater {
         // dropped by the backfill). Preserve the live API's key order for output.
         const upsertIssueRef = this.conn.prepare(`
           INSERT INTO cv_volume_issue_ref
-            (volume_id, ref_type, issue_id, name, issue_number, api_detail_url, key_order)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+            (volume_id, ref_type, issue_id, key_order)
+          VALUES (?, ?, ?, ?)
           ON CONFLICT(volume_id, ref_type) DO UPDATE SET
             issue_id = excluded.issue_id,
-            name = excluded.name,
-            issue_number = excluded.issue_number,
-            api_detail_url = excluded.api_detail_url,
             key_order = excluded.key_order
         `);
         for (const [ref, refType] of [[vol.first_issue, "first"], [vol.last_issue, "last"]]) {
           if (ref && typeof ref === "object") {
             upsertIssueRef.run(
               volId, refType,
-              ref.id ?? null, ref.name ?? null, ref.issue_number ?? null,
-              ref.api_detail_url ?? null, JSON.stringify(Object.keys(ref))
+              ref.id ?? null, JSON.stringify(Object.keys(ref))
             );
           }
         }

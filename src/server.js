@@ -100,6 +100,9 @@ function creditRowToObject(row) {
 
 // Rebuild a first/last issue reference honoring the stored key order, so the two
 // historical key-order variants (id-first vs api_detail_url-first) serialize byte-for-byte.
+// The display fields (name/issue_number/api_detail_url) come from the joined cv_issue
+// row; the id is the ref's own issue_id (so a ref whose issue isn't synced locally still
+// emits its id, with the joined fields null).
 function issueRefRowToObject(row) {
   const values = {
     id: row.issue_id,
@@ -137,8 +140,18 @@ function buildVolumeResult(row, database) {
       : null;
   });
 
+  // The ref row holds only the issue id + key order; the display fields are
+  // resolved from cv_issue. A LEFT JOIN keeps a ref whose issue isn't synced
+  // locally (the DB is a subset) rather than dropping it — the joined fields
+  // come back null in that case.
   const refRows = database
-    .prepare("SELECT * FROM cv_volume_issue_ref WHERE volume_id = ?")
+    .prepare(
+      `SELECT r.ref_type, r.issue_id, r.key_order,
+              i.name, i.issue_number, i.api_detail_url
+         FROM cv_volume_issue_ref r
+         LEFT JOIN cv_issue i ON i.id = r.issue_id
+        WHERE r.volume_id = ?`
+    )
     .all(row.id);
   for (const field of ["first_issue", "last_issue"]) {
     const kind = field === "first_issue" ? "first" : "last";
@@ -341,7 +354,8 @@ function buildResourceConfig(database, resource) {
   const hasCreditTables =
     volumeColumns.has("credits_presence") &&
     tableColumns(database, "cv_volume_credit").size > 0 &&
-    tableColumns(database, "cv_volume_issue_ref").size > 0;
+    tableColumns(database, "cv_volume_issue_ref").size > 0 &&
+    tableColumns(database, "cv_issue").size > 0;
   if (hasCreditTables) build = (row) => buildVolumeResult(row, database);
   } else if (singular === "team" || singular === "story_arc") {
   alias = singular === "team" ? "t" : "a";
