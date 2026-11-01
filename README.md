@@ -1,5 +1,9 @@
 # ComicVine API Local
 
+> **Non-commercial use only.** This project is intended for personal, educational, and other non-commercial use. It is not affiliated with, endorsed by, or sponsored by ComicVine / GameSpot / Fandom, and it must not be used to power any commercial product, service, or paid offering.
+
+> **Credit.** All data in this project is sourced from [ComicVine](https://comicvine.gamespot.com) (a [GameSpot](https://www.gamespot.com) / Fandom service). The [ComicVine API](https://comicvine.gamespot.com/api/) is used to populate `localcv.db`, and all content remains the property of its respective owners. If you use this project, please link back to [comicvine.gamespot.com](https://comicvine.gamespot.com) and give credit to ComicVine.
+
 A local, read-only mirror of the ComicVine API backed by `localcv.db`.
 It uses Node.js built-in HTTP and SQLite modules, so no npm dependencies are required.
 
