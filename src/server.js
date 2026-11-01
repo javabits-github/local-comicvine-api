@@ -1,6 +1,7 @@
 const { createServer } = require("node:http");
 const { DatabaseSync } = require("node:sqlite");
 const path = require("node:path");
+const fs = require("node:fs");
 const { resourceConfig } = require("./fieldConfig.js");
 const { validateEntity } = require("./validate.js");
 
@@ -659,15 +660,49 @@ function publisherBlocklistPredicate(config, ids) {
   return { clause: ` AND ${config.alias}.publisher_id NOT IN (${placeholders})`, values: ids };
 }
 
-// Default logger: one line per entry, prefixed with a readable timestamp and
-// level, written to the stream matching its level. Custom loggers (e.g. tests)
-// receive the stamped entry directly and ignore this formatting.
-function defaultLogger(entry) {
+// Format a stamped log entry as one line: a readable `[timestamp] [LEVEL]`
+// prefix followed by the JSON body. Shared by the console and file loggers so
+// both emit identical lines.
+function formatLogLine(entry) {
   const prefix = `[${entry.timestamp ?? new Date().toISOString()}] [${(entry.level ?? "info").toUpperCase()}] `;
-  const line = `${prefix}${JSON.stringify(entry)}`;
+  return `${prefix}${JSON.stringify(entry)}`;
+}
+
+// Default logger: one line per entry, written to the stream matching its level.
+// Custom loggers (e.g. tests) receive the stamped entry directly and ignore this
+// formatting.
+function defaultLogger(entry) {
+  const line = formatLogLine(entry);
   if (entry.level === "error") console.error(line);
   else if (entry.level === "warn") console.warn(line);
   else console.info(line);
+}
+
+// SRV-7: a rotating file logger. Each entry is appended to `filePath` as a
+// formatted line (same shape as the console output). When the file grows past
+// `maxSize` bytes it is rotated: the current file is renamed to `filePath.1`,
+// `filePath.1` to `filePath.2`, and so on up to `maxFiles` generations, with the
+// oldest removed. The append is synchronous (matching the server's synchronous
+// node:sqlite usage) so each line is on disk before the request handler returns.
+// Rotation and writes are best-effort — a filesystem error is surfaced to stderr
+// and the entry is skipped rather than crashing the server.
+function createRotatingFileLogger(filePath, maxSize = 10 * 1024 * 1024, maxFiles = 5) {
+  const rotate = () => {
+    // Shift the existing generations, dropping the one beyond maxFiles.
+    for (let i = maxFiles - 1; i >= 1; i--) {
+      const source = `${filePath}.${i}`;
+      if (fs.existsSync(source)) fs.renameSync(source, `${filePath}.${i + 1}`);
+    }
+    if (fs.existsSync(filePath)) fs.renameSync(filePath, `${filePath}.1`);
+  };
+  return (entry) => {
+    try {
+      if (fs.existsSync(filePath) && fs.statSync(filePath).size >= maxSize) rotate();
+      fs.appendFileSync(filePath, formatLogLine(entry) + "\n");
+    } catch (error) {
+      console.error(`[LOG] file logging error: ${error.message}`);
+    }
+  };
 }
 
 function createApiServer(
@@ -715,13 +750,24 @@ function createApiServer(
    // the configured threshold are emitted; anything above is dropped.
    const logLevels = { debug: 10, info: 20, warn: 30, error: 40 };
    const logThreshold = logLevels[String(options.logLevel ?? process.env.COMICVINE_LOG_LEVEL ?? "info").toLowerCase()] ?? logLevels.info;
+
+   // SRV-7: optional file logging. When a path is configured (options.logFile or
+   // COMICVINE_LOG_FILE) every emitted entry is also appended to that file, with
+   // size-based rotation. Options fall back to the matching COMICVINE_* env vars;
+   // stdout/stderr logging (the `logger` above) always continues regardless.
+   const logFilePath = options.logFile ?? process.env.COMICVINE_LOG_FILE ?? null;
+   const logMaxSize = positiveInt(options.logMaxSize ?? process.env.COMICVINE_LOG_MAX_SIZE, 10 * 1024 * 1024);
+   const logMaxFiles = positiveInt(options.logMaxFiles ?? process.env.COMICVINE_LOG_MAX_FILES, 5);
+   const fileLogger = logFilePath ? createRotatingFileLogger(logFilePath, logMaxSize, logMaxFiles) : null;
+
    // Central log sink: stamps an ISO-8601 timestamp and a level (defaulting to
-   // "info") on every entry, then applies the level threshold before delegating
-   // to the configured logger.
+   // "info") on every entry, applies the level threshold, then delegates to the
+   // configured logger (stdout/stderr) and, when enabled, the rotating file.
    const log = (level, entry) => {
      const record = { ...entry, level, timestamp: new Date().toISOString() };
      if ((logLevels[level] ?? logLevels.info) < logThreshold) return;
      logger(record);
+     if (fileLogger) fileLogger(record);
    };
 
    const server = createServer(async (request, response) => {

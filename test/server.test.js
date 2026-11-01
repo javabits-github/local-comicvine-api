@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const { mkdtempSync, rmSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -566,6 +567,60 @@ test("drops log entries below the configured level threshold", async () => {
     await new Promise((resolve) => quietServer.close(resolve));
     if (previousKey === undefined) delete process.env.COMICVINE_API_KEY;
     else process.env.COMICVINE_API_KEY = previousKey;
+  }
+});
+
+test("writes log entries to a rotating file and keeps stdout logging", async () => {
+  const fileDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-log-test-"));
+  const logFile = path.join(fileDirectory, "server.log");
+  const stdoutEntries = [];
+  const fileServer = createApiServer(databasePath, (entry) => stdoutEntries.push(entry), {
+    logFile
+  });
+  await new Promise((resolve) => fileServer.listen(0, "127.0.0.1", resolve));
+  const fileUrl = `http://127.0.0.1:${fileServer.address().port}`;
+
+  try {
+    await fetch(`${fileUrl}/api/people?api_key=mock`);
+
+    // The entry is still delivered to the (stdout) logger...
+    assert.equal(stdoutEntries.at(-1).path, "/api/people");
+    // ...and is also appended to the configured file as a formatted line.
+    const fileContents = await fs.promises.readFile(logFile, "utf-8");
+    assert.match(fileContents, /\[INFO\] /);
+    assert.match(fileContents, /"path":"\/api\/people"/);
+    // Credentials are redacted in the file too.
+    assert.ok(!fileContents.includes("mock"));
+  } finally {
+    await new Promise((resolve) => fileServer.close(resolve));
+    rmSync(fileDirectory, { recursive: true, force: true });
+  }
+});
+
+test("rotates the log file when it exceeds the size limit", async () => {
+  const fileDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-log-rotate-test-"));
+  const logFile = path.join(fileDirectory, "server.log");
+  const fileServer = createApiServer(databasePath, () => {}, {
+    logFile,
+    logMaxSize: 1, // force rotation on the very first write
+    logMaxFiles: 3
+  });
+  await new Promise((resolve) => fileServer.listen(0, "127.0.0.1", resolve));
+  const fileUrl = `http://127.0.0.1:${fileServer.address().port}`;
+
+  try {
+    // Each request writes a line that exceeds the 1-byte cap, so the file
+    // rotates before the new line is appended.
+    await fetch(`${fileUrl}/api/people`);
+    await fetch(`${fileUrl}/api/people`);
+
+    // The current file holds the most recent line; an older generation exists.
+    const current = await fs.promises.readFile(logFile, "utf-8");
+    assert.match(current, /"path":"\/api\/people"/);
+    assert.ok(fs.existsSync(`${logFile}.1`), "expected a rotated generation");
+  } finally {
+    await new Promise((resolve) => fileServer.close(resolve));
+    rmSync(fileDirectory, { recursive: true, force: true });
   }
 });
 
