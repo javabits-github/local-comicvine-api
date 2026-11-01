@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
-const { ComicVineUpdater, jsonify } = require("../src/updater.js");
+const { ComicVineUpdater, confirmFullSync, jsonify } = require("../src/updater.js");
 
 const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-test-"));
 const databasePath = path.join(directory, "test.db");
@@ -302,4 +302,14 @@ test("incremental sync includes date filter", async () => {
   updater.close();
   const u = new URL(urls[0]);
   assert.equal(u.searchParams.get("filter"), "date_last_updated:2026-01-01|2026-01-02");
+});
+
+// ─── confirmFullSync (UPD-2) ────────────────────────────────────────────────
+
+test("confirmFullSync returns true when --yes is passed without prompting", async () => {
+  assert.equal(await confirmFullSync({ interactive: false, yes: true }), true);
+});
+
+test("confirmFullSync refuses a non-interactive full sync without --yes", async () => {
+  assert.equal(await confirmFullSync({ interactive: false, yes: false }), false);
 });

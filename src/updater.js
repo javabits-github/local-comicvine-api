@@ -12,10 +12,15 @@
  *   node src/updater.js [database_path]
  *   node src/updater.js --non-interactive --db-dir /path/to/db
  *   node src/updater.js --full [database_path]
+ *   node src/updater.js --full --yes [database_path]
  *   COMICVINE_API_KEY=your_key node src/updater.js --non-interactive --db-dir /path/to/db
  *
  * npm run sync          — incremental sync
  * npm run sync:full     — one-time full sync (thousands of API calls)
+ *
+ * A full sync is expensive (one call per page across all six endpoints, i.e.
+ * ~1.1M issue-detail calls). It is gated behind an interactive "yes" prompt,
+ * or the --yes flag in non-interactive runs (UPD-2).
  */
 
 "use strict";
@@ -24,6 +29,7 @@ const { DatabaseSync } = require("node:sqlite");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const readline = require("node:readline/promises");
 
 // ─── API Configuration ───────────────────────────────────────────────────────
 const API_BASE_URL = "https://comicvine.gamespot.com/api/";
@@ -1508,6 +1514,43 @@ function cleanupOldDatabases(dbDir, keepDays = 7, verbose = true) {
   return deletedCount;
 }
 
+// ─── Full-Sync Confirmation (UPD-2) ─────────────────────────────────────────
+
+// A full sync issues one unfiltered call per page across all six endpoints.
+// With the live API's ~1.1M issues and the 200-calls/hour rate limit, a full
+// pass cannot be parallelized and takes on the order of weeks of continuous
+// calls to complete. Gate it behind an explicit confirmation so it is never
+// triggered by accident (e.g. a stray `npm run sync:full` in cron).
+async function confirmFullSync({ interactive, yes }) {
+  if (yes) return true;
+
+  const calls = "~1.1 million (one per issue detail, plus per-page calls for the other five endpoints)";
+  const line = "=".repeat(50);
+  console.error(`\n${line}`);
+  console.error("FULL SYNC WARNING");
+  console.error(line);
+  console.error(`A full sync makes ${calls} live API calls.`);
+  console.error(`At the ComicVine rate limit (200 calls/hour, then a 1-hour ban),`);
+  console.error(`a full pass cannot be parallelized and takes on the order of WEEKS`);
+  console.error(`of continuous calls to complete. It also exhausts your daily quota`);
+  console.error(`and blocks incremental syncs for the same period.`);
+  console.error(`${line}\n`);
+
+  if (!interactive) {
+    console.error("Non-interactive run: refusing to start a full sync without explicit confirmation.");
+    console.error("Re-run with --yes to confirm, or drop --full for an incremental sync.");
+    return false;
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = (await rl.question("Type 'yes' to confirm the full sync: ")).trim().toLowerCase();
+    return answer === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
 // ─── CLI Argument Parsing ────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -1515,13 +1558,14 @@ function parseArgs(argv) {
     database: null, dbPath: null, dbDir: null,
     apiKey: null, startDate: null,
     full: false, nonInteractive: false, quiet: false,
-    noCopy: false, keepDays: 7
+    noCopy: false, keepDays: 7, yes: false
   };
 
   let positional = 0;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--full") args.full = true;
+    else if (arg === "--yes" || arg === "-y") args.yes = true;
     else if (arg === "--non-interactive") args.nonInteractive = true;
     else if (arg === "--quiet") args.quiet = true;
     else if (arg === "--no-copy") args.noCopy = true;
@@ -1556,6 +1600,7 @@ Options:
   --api-key <key>      ComicVine API key (or COMICVINE_API_KEY env var)
   --start-date <date>  Custom start date YYYY-MM-DD (default: automatic)
   --full               Full sync: fetch every record (no date filter)
+  --yes, -y            Confirm a full sync without an interactive prompt
   --non-interactive    Run without prompts (for cron)
   --quiet              Reduce output verbosity
   --no-copy            Don't create dated copy, update in place
@@ -1666,6 +1711,15 @@ async function main() {
     process.exit(1);
   }
 
+  // UPD-2: gate an expensive full sync behind explicit confirmation.
+  if (args.full) {
+    const confirmed = await confirmFullSync({ interactive, yes: args.yes });
+    if (!confirmed) {
+      console.error("Full sync not confirmed. Exiting without syncing.");
+      process.exit(1);
+    }
+  }
+
   // Validate custom start date
   let startDate = null;
   if (!args.full) {
@@ -1730,6 +1784,7 @@ module.exports = {
   findLatestDatabase,
   createTodaysDatabase,
   cleanupOldDatabases,
+  confirmFullSync,
   jsonify,
   API_BASE_URL,
   HEADERS,

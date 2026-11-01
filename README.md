@@ -74,6 +74,12 @@ npm sync          # incremental sync (since the last sync date)
 npm sync:full     # one-time full refresh (no date filter; thousands of live API calls)
 ```
 
+A full sync is expensive (one unfiltered call per page across all six endpoints ≈ ~1.1M issue-detail calls; at the 200-calls/hour rate limit it runs for weeks and cannot be parallelized), so it is gated behind a confirmation. In an interactive run the updater prints a warning and asks you to type `yes`; in a non-interactive run it aborts unless you confirm explicitly:
+
+```powershell
+npm sync:full -- --yes   # confirm the full sync without an interactive prompt
+```
+
 `npm sync` runs the updater with `--env-file-if-exists=.env`, so `COMICVINE_API_KEY` is read from `.env`. The key is resolved in order: the `--api-key` flag, then the `comicvine_config.env` file, then the `COMICVINE_API_KEY` environment variable. The updater opens the database in WAL mode, upserts each resource into its `cv_*` table (all bound values go through a JSON serializer), and advances `cv_sync_metadata.last_sync_date` only for endpoints that succeed. It reuses the server's `field_list` projection and the live API's retry contract (107 → escalating backoff, 100 → abort, 420 → wait). The updater's email report and GUI database picker (Python `smtplib`/`tkinter`) have no zero-dependency Node equivalent and are not implemented. See [sqlite_cv_updater/README.md](sqlite_cv_updater/README.md) for the full flag reference.
 
 ## Docker
@@ -109,6 +115,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-11-01 — Confirmation gate for full sync (UPD-2)
+
+- **Context:** a `--full` sync issues one unfiltered call per page across all six endpoints — on the order of ~1.1M issue-detail calls. At the live API's 200-calls/hour rate limit (then a 1-hour ban) it cannot be parallelized and takes on the order of weeks of continuous calls, so an accidental `npm run sync:full` (e.g. in cron) is costly to recover from.
+- **Change:** added `confirmFullSync()` in [src/updater.js](src/updater.js). Before a full sync the updater prints a prominent warning (call count, the rate-limit math, the multi-week runtime) and then: in an interactive run it requires typing `yes`; in a non-interactive run it aborts unless `--yes`/`-y` is passed. The flag is documented in the updater's help text and header.
+- **Gotcha / follow-up:** the gate runs in `main()` after API-key validation, so a declined full sync exits cleanly (code 1) without touching the database. The interactive prompt reads from stdin via `node:readline/promises` and writes the warning to stderr. See `TODO.md` UPD-2.
 
 #### 2026-11-01 — Optional file logging with rotation (SRV-7)
 
