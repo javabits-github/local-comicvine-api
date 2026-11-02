@@ -960,3 +960,101 @@ test("excludes blocked publishers from volume search and list (SRV-12)", async (
     rmSync(blockDirectory, { recursive: true, force: true });
   }
 });
+
+// ─── SRV-13: API-key authentication ──────────────────────────────────────────
+
+function makeAuthTestDb() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-auth-test-"));
+  const dbPath = path.join(dir, "auth.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, site_detail_url TEXT);
+    CREATE TABLE cv_volume (
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT,
+      publisher_id INTEGER, count_of_issues INTEGER, description TEXT,
+      image_url TEXT, site_detail_url TEXT, character_credits TEXT, team_credits TEXT,
+      date_added TEXT, date_last_updated TEXT, deck TEXT
+    );
+  `);
+  db.prepare("INSERT INTO cv_volume (id, name, date_added) VALUES (?, ?, ?)").run(7300, "Witchblade", "2020-04-15 10:00:00");
+  db.close();
+  return { dir, dbPath };
+}
+
+test("serves unauthenticated when no API keys are configured (SRV-13)", async () => {
+  const { dir, dbPath } = makeAuthTestDb();
+  const srv = createApiServer(dbPath, () => {});
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const res = await fetch(`${url}/api/volumes?limit=10`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.status_code, 1);
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rejects resource requests without a valid key when auth is enabled (SRV-13)", async () => {
+  const { dir, dbPath } = makeAuthTestDb();
+  const srv = createApiServer(dbPath, () => {}, { apiKeys: ["good-key", "another-key"] });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    // No key at all -> 401, invalid key -> 401.
+    for (const path of [`${url}/api/volumes?limit=1`, `${url}/api/volumes?limit=1&api_key=wrong`, `${url}/api/search/?query=blade&resources=volume`]) {
+      const res = await fetch(path);
+      assert.equal(res.status, 401);
+      const body = await res.json();
+      assert.equal(body.status_code, 100);
+      assert.match(body.error, /API key/i);
+    }
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("accepts a valid key via query param, header, or Authorization (SRV-13)", async () => {
+  const { dir, dbPath } = makeAuthTestDb();
+  const srv = createApiServer(dbPath, () => {}, { apiKeys: ["good-key", "another-key"] });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    // Query parameter.
+    const q = await fetch(`${url}/api/volumes?limit=1&api_key=good-key`);
+    assert.equal(q.status, 200);
+    assert.equal((await q.json()).status_code, 1);
+
+    // X-Api-Key header.
+    const h = await fetch(`${url}/api/volumes?limit=1`, { headers: { "X-Api-Key": "another-key" } });
+    assert.equal(h.status, 200);
+    assert.equal((await h.json()).status_code, 1);
+
+    // Authorization Bearer header.
+    const b = await fetch(`${url}/api/volumes?limit=1`, { headers: { Authorization: "Bearer good-key" } });
+    assert.equal(b.status, 200);
+    assert.equal((await b.json()).status_code, 1);
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("leaves the /api index and /api/status open even when auth is enabled (SRV-13)", async () => {
+  const { dir, dbPath } = makeAuthTestDb();
+  const srv = createApiServer(dbPath, () => {}, { apiKeys: ["good-key"] });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const index = await fetch(`${url}/api`);
+    assert.equal(index.status, 200);
+    const status = await fetch(`${url}/api/status`);
+    assert.equal(status.status, 200);
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

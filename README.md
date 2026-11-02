@@ -32,6 +32,10 @@ Set `COMICVINE_VALIDATE=1` (or pass `createApiServer` a `validate: true` option)
 
 Set `COMICVINE_PUBLISHER_BLOCKLIST` to a comma-separated list of publisher ids (e.g. `5,9,42`) to exclude a publisher's volumes from the **volume** search and list results. Only volumes are affected — it is the only local resource with a `publisher_id` column, so it has no effect on issues, people, teams, or story arcs. The blocklist is a `publisher_id NOT IN (...)` predicate. On the list endpoint it does **not** override an explicit `?filter=publisher_id=…` or `?filter=publisher=…` request — an explicit publisher filter wins. It is also available as the `publisherBlocklist` option of `createApiServer` (an array of ids), which takes precedence over the environment variable.
 
+### API key authentication
+
+Authentication is **off by default** — the server serves every endpoint unauthenticated, which suits local use. To require a key, set `COMICVINE_API_KEYS` to a comma-separated list of accepted keys (e.g. `key1,key2`), or pass `createApiServer` an `apiKeys` option (an array or comma-separated string). When one or more keys are configured, requests to the **resource endpoints** (search, list, detail) must present a matching key, supplied via the `api_key` query parameter, the `X-Api-Key` header, or an `Authorization: Bearer <key>` header (checked in that priority order). A missing or invalid key returns HTTP `401` with a ComicVine-style envelope: `{ "error": "…", "status_code": 100 }`, matching the live API's "invalid API key" response. The local-only `/api` index and `/api/status` endpoints stay open without a key so discovery and monitoring keep working. The `OPTIONS` preflight allows the `X-Api-Key` and `Authorization` headers.
+
 ## Endpoints
 
 The configured `localcv.db` provides volumes, issues, publishers, people, teams, and story arcs. These endpoints use the ComicVine response envelope; volumes, publishers, people, teams, and story arcs also support field selection, sorting, filters, and JSON, XML, or JSONP formats. Issue list and detail responses also honor `field_list`, omitting unrequested fields such as the credit arrays; unrecognized field names are ignored. An issue's `volume` object includes `id`, `name`, `api_detail_url`, and `site_detail_url`; `api_detail_url` is derived from the volume ID when it is not stored in the database. Issue filters on `volume` or `volume_id` compare exact IDs and accept either a number or ComicVine ID such as `4050-7300`. Each resource reads its normalized columns directly from the database; credit arrays and relationship objects are stored as JSON text and parsed on demand, so no raw API payload is stored in `localcv.db`. Resources whose tables are absent return 404.
@@ -115,6 +119,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-11-01 — API key authentication (SRV-13)
+
+- **Context:** the live ComicVine API requires a caller-supplied `api_key`, but the local server served every endpoint unauthenticated, so a misconfigured or exposed server gave open access to the bundled data.
+- **Change:** added optional key authentication in [src/server.js](src/server.js). `COMICVINE_API_KEYS` (comma-separated) or the `apiKeys` option on `createApiServer` is parsed into a `Set` (`parseKeyList`). When non-empty, the request handler checks the caller's key (`extractApiKey`: `X-Api-Key`/`X_API_KEY` header → `Authorization: Bearer` → `api_key`/`key` query param) and rejects a missing/invalid key with HTTP 401 and a ComicVine-style `{ error, status_code: 100 }` envelope. The local-only `/api` index and `/api/status` stay open, and the `OPTIONS` preflight now allows the credential headers. Authentication is **off by default** (empty list), so existing local usage is unchanged.
+- **Gotcha / follow-up:** matching is an exact string compare against the allowlist (no hashing); keys are opaque tokens so this is fine for a local allowlist, but a deployment exposing the server should keep the key list secret — it is read from the environment, not the DB. See `TODO.md` SRV-13.
 
 #### 2026-11-01 — Confirmation gate for full sync (UPD-2)
 

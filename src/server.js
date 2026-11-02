@@ -651,6 +651,41 @@ function parseIdList(value) {
   return ids;
 }
 
+// SRV-13: parse a comma/whitespace-separated list of API keys (e.g. "key1, key2").
+// Blanks are dropped and the list is de-duplicated, preserving order. A key is
+// an opaque string (the live ComicVine key format is 31 hex chars, but we accept
+// any non-empty token).
+function parseKeyList(value) {
+  if (value === undefined || value === null) return [];
+  const seen = new Set();
+  const keys = [];
+  for (const token of String(value).split(/[\s,]+/)) {
+    if (!token) continue;
+    if (!seen.has(token)) {
+      seen.add(token);
+      keys.push(token);
+    }
+  }
+  return keys;
+}
+
+// SRV-13: pull the caller's API key from the most likely carrier, in priority
+// order: the `X-Api-Key` (or `X_API_KEY`) header, a `Bearer` Authorization
+// header, then the `api_key`/`key` query parameter. Returns the raw string or
+// null when no credential is present.
+function extractApiKey(request, url) {
+  const headerKey = request.headers["x-api-key"] ?? request.headers["x_api_key"];
+  if (typeof headerKey === "string" && headerKey.trim()) return headerKey.trim();
+  const auth = request.headers["authorization"];
+  if (typeof auth === "string") {
+    const match = auth.match(/^Bearer\s+(\S+)$/i);
+    if (match && match[1]) return match[1];
+  }
+  const queryKey = url.searchParams.get("api_key") ?? url.searchParams.get("key");
+  if (queryKey && queryKey.trim()) return queryKey.trim();
+  return null;
+}
+
 // SRV-12: a `publisher_id NOT IN (...)` predicate for volume queries. Empty when
 // there is no blocklist or the resource has no publisher_id column. Returns separate
 // clause and values so the caller can append both to a prepared statement.
@@ -734,6 +769,18 @@ function createApiServer(
        : process.env.COMICVINE_PUBLISHER_BLOCKLIST
    );
 
+   // SRV-13: optional API-key authentication. `options.apiKeys` is an array of
+   // accepted keys (or a comma-separated string); when unset it falls back to the
+   // COMICVINE_API_KEYS env var. Authentication is OFF when no keys are
+   // configured (empty list), so existing local usage is unchanged. When one or
+   // more keys are set, requests to resource endpoints must present a matching
+   // key. The local-only index (/api) and /api/status endpoints stay open.
+   const apiKeys = new Set(parseKeyList(
+     options.apiKeys !== undefined
+       ? (Array.isArray(options.apiKeys) ? options.apiKeys.join(",") : options.apiKeys)
+       : process.env.COMICVINE_API_KEYS
+   ));
+
    // SRV-8: when enabled, detail responses are diffed against the live ComicVine
    // API to verify the bundled data. The live key comes from the environment
    // (COMICVINE_API_KEY); without it the validator cannot run and is skipped.
@@ -799,10 +846,12 @@ function createApiServer(
     });
 
     if (request.method === "OPTIONS") {
+      // SRV-13: allow the credential headers the auth check accepts, so a
+      // browser client can preflight a request that carries an API key.
       response.writeHead(204, {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
+        "Access-Control-Allow-Headers": "Content-Type, X-Api-Key, Authorization"
       });
       response.end();
       return;
@@ -867,6 +916,32 @@ function createApiServer(
         total_requests: endpoints.reduce((sum, entry) => sum + entry.requests, 0)
       });
       return;
+    }
+
+    // SRV-13: enforce API-key authentication on resource endpoints (search,
+    // list, detail) when one or more keys are configured. The local-only index
+    // (/api) and /api/status endpoints are handled above and stay open, so
+    // monitoring and discovery work without a key. A missing or invalid key
+    // yields HTTP 401 with a ComicVine-style `status_code: 100` envelope
+    // (matching the live API's "invalid API key" response).
+    if (apiKeys.size > 0) {
+      const providedKey = extractApiKey(request, url);
+      if (!providedKey || !apiKeys.has(providedKey)) {
+        response.once("finish", () => {
+          log("warn", {
+            type: "auth",
+            method: request.method,
+            path: url.pathname,
+            status: 401,
+            reason: providedKey ? "invalid_api_key" : "missing_api_key"
+          });
+        });
+        sendJson(response, 401, {
+          error: "Invalid API key. Provide a valid key via the api_key query parameter, the X-Api-Key header, or an Authorization Bearer header.",
+          status_code: 100
+        });
+        return;
+      }
     }
 
     const segments = url.pathname.split("/").filter(Boolean);
@@ -1069,6 +1144,9 @@ if (require.main === module) {
     // COMICVINE_VALIDATE=1 enables SRV-8 live-API validation on detail endpoints;
     // the live key is read from COMICVINE_API_KEY.
   if (process.env.COMICVINE_VALIDATE) options.validate = true;
+    // SRV-13: COMICVINE_API_KEYS enables incoming-request key authentication for
+    // resource endpoints. When unset the server stays open (local default).
+  if (process.env.COMICVINE_API_KEYS) options.apiKeys = process.env.COMICVINE_API_KEYS;
   const server = createApiServer(databasePath, undefined, options);
   server.listen(port, host, () => {
     defaultLogger({ type: "startup", level: "info", message: `listening at http://${host}:${port}`, timestamp: new Date().toISOString() });

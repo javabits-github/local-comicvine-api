@@ -22,7 +22,7 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 - `number_of_page_results` is `results.length` for lists, `1` for details.
 - Detail 404s return the envelope with `error: "Object Not Found"`, `status_code: 101`, `results: null`.
 - Formats: `format=json` (default), `xml`, `jsonp` (requires `json_callback`); invalid format → 400.
-- `api_key` is accepted but ignored.
+- `api_key` is accepted but ignored **unless** SRV-13 key authentication is enabled (`COMICVINE_API_KEYS` / `options.apiKeys` non-empty); then resource endpoints (search/list/detail) require a matching key (via `api_key` query param, `X-Api-Key` header, or `Authorization: Bearer`) and a missing/invalid key returns HTTP 401 with `{ error, status_code: 100 }`. The local-only `/api` index and `/api/status` stay open regardless.
 
 ## field_list projection
 
