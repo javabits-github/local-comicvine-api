@@ -57,31 +57,44 @@ The updater is a zero-dependency Node.js script (`node:sqlite` + `fetch`), the p
 ```mermaid
 flowchart TB
     CV[ComicVine live API<br/>comicvine.gamespot.com/api]
+    START[main<br/>resolve db + api key]
+    VAL{validateApiKey}
+    FULL{"--full? confirm<br/>(type yes / --yes)"}
+
+    START --> VAL
+    VAL -->|100 invalid key| EXIT1[exit 1 — abort run]
+    VAL -->|1 ok / 107 ok| FULL
+    FULL -->|not confirmed| EXIT2[exit 1 — no sync]
+    FULL -->|confirmed| AC
 
     CV -->|HTTP 200 + status_code| AC[apiCall<br/>retry loop, MAX_RETRIES = 5]
     AC -->|107 rate limit| W[backoff 60s × attempt<br/>then retry]
     W --> AC
-    AC -->|420| W4[wait 600s × attempt]
+    AC -->|420| W4[wait 600s × attempt<br/>then retry]
     W4 --> AC
-    AC -->|100 invalid key| N1[return null → abort run]
-    AC -->|exhausted 107| N2[return null]
+    AC -->|100 invalid key| N1[return null<br/>→ endpoint skipped]
+    AC -->|exhausted 107| N2[return null<br/>→ endpoint skipped]
+    AC -->|status 1| SYNC
 
-    AC -->|status 1| SYNC{"runSync<br/>per endpoint"}
+    SYNC{"runSync<br/>per endpoint, in order"}
+    N1 --> SYNC
     N2 --> SYNC
 
     SYNC --> SP[syncPublishers]
+    SYNC --> SP2[syncPersons]
     SYNC --> SV[syncVolumes]
     SYNC --> SI[syncIssues]
-    SYNC --> SP2[syncPersons]
     SYNC --> ST[syncTeams]
     SYNC --> SA[syncStoryarcs]
 
-    SP & SV & SI & SP2 & ST & SA --> J["jsonify every bound value<br/>dict/list/bool → JSON text / 1-0"]
+    SP & SP2 & SV & SI & ST & SA --> J["jsonify every bound value<br/>obj → JSON text, bool → 1/0"]
     J --> U[(upsert into cv_* tables)]
     U --> M[cv_sync_metadata<br/>last_sync_date — advanced only on success]
+    M --> POST[recalc volume issue counts<br/>+ rebuild FTS index]
 
     style AC fill:#264f78,stroke:#6ea1d6,color:#fff
     style U fill:#264f78,stroke:#6ea1d6,color:#fff
+    style N1 fill:#7a2e2e,stroke:#c06060,color:#fff
     style N2 fill:#7a2e2e,stroke:#c06060,color:#fff
 ```
 
@@ -188,7 +201,7 @@ Notes on the schema:
 
 ## Notes
 
-- **Server** is a single file, zero npm deps: `node:http` + `node:sqlite`. Only `volume` honors `?sort=`; only `search` honors `COMICVINE_FORCED_LIMIT`.
+- **Server** is a single file, zero npm deps: `node:http` + `node:sqlite`. Every **list** endpoint honors `?sort=` (SRV-1); only `search` honors `COMICVINE_FORCED_LIMIT`.
 - **Search** matches `name LIKE %query%` per selected resource (volumes newest-first, issues by numeric issue number), concatenates the hits in resource order, then slices one page — so `number_of_total_results` is the combined count across resources.
-- **Updater** is incremental by default (`date_last_updated` filter since last safe sync date); `--full` drops the filter. Skipped endpoints (rate-limit exhaustion) don't advance `cv_sync_metadata`, so the next run re-syncs from the old start date.
+- **Updater** is incremental by default (`date_last_updated` filter since last safe sync date); `--full` drops the filter but is gated behind a `yes` confirmation (UPD-2). `validateApiKey` runs once at startup — a `100` there aborts the whole run (`exit 1`); a `100`/exhausted-`107` *mid-run* just makes `apiCall` return `null` and that endpoint is skipped. Skipped endpoints don't advance `cv_sync_metadata`, so the next run re-syncs from the old start date.
 - Credit/relationship columns are JSON text; the server parses them in JS, never in SQL.
