@@ -39,6 +39,35 @@ const sortableVolumeFields = new Set([
   "aliases", "count_of_issues", "date_added", "date_last_updated", "deck",
   "description", "id", "name", "site_detail_url", "start_year"
 ]);
+const sortableIssueFields = new Set([
+  "aliases", "cover_date", "date_added", "date_last_updated", "deck",
+  "description", "id", "issue_number", "name", "store_date"
+]);
+
+// SRV-1: the allowlist of sortable fields per resource for the list endpoint.
+// Volumes and issues have their own Sets above (issues also sort on issue_number
+// and the date columns); the remaining resources map to their allowlists here.
+const sortableFieldsByResource = {
+  issue: sortableIssueFields,
+  person: sortablePersonFields,
+  publisher: sortablePublisherFields,
+  story_arc: sortableStoryArcFields,
+  team: sortableTeamFields,
+  volume: sortableVolumeFields
+};
+
+// SRV-1: the default sort column each list endpoint uses when the client does not
+// pass ?sort=. All default to "id" to match the live ComicVine API (and existing
+// behavior/tests); the `defaultSort` option on createApiServer (a field name or a
+// per-resource map) can override it, e.g. { volume: "name" } or { issue: "issue_number" }.
+const defaultSortByResource = {
+  issue: "id",
+  person: "id",
+  publisher: "id",
+  story_arc: "id",
+  team: "id",
+  volume: "id"
+};
 
 // Per-resource field allowlist and relationship sets live in fieldConfig.js, shared
 // with the live-API validator (src/validate.js).
@@ -567,9 +596,15 @@ function parseFilters(filter, config) {
 }
 
 // Sort SQL is built from the resource's columns; a field with no column leaves the
-// default order. The allowlist guards the interpolated column name.
-function parseSort(config, sort, sortableFields) {
-  if (!sort) return "id ASC";
+// default order. The allowlist guards the interpolated column name. When `sort`
+// is absent the resource's default sort column (default "id ASC") is used, so each
+// list endpoint has a stable, predictable ordering.
+function parseSort(config, sort, sortableFields, defaultColumn = "id") {
+  if (!sort) {
+    const expression = columnExpression(config, defaultColumn);
+    const column = expression.kind === "column" ? expression.expression : `${config.alias}.id`;
+    return `${column} ASC`;
+  }
   const match = sort.match(/^([a-z][a-z0-9_]*):(asc|desc)$/i);
   if (!match || !sortableFields.has(match[1])) {
    throw new Error("Sort must use a supported field and asc or desc direction.");
@@ -818,6 +853,22 @@ function createApiServer(
        ? (Array.isArray(options.corsOrigins) ? options.corsOrigins.join(",") : options.corsOrigins)
        : process.env.COMICVINE_CORS_ORIGINS
    );
+
+   // SRV-1: the default sort column for list endpoints that have no ?sort=.
+   // `options.defaultSort` is either a single field name (applied to every
+   // resource) or a per-resource map, e.g. { volume: "name", issue: "issue_number" };
+   // when unset it falls back to the COMICVINE_DEFAULT_SORT env var (a single field
+   // name). Unset, it keeps every resource on "id" (the live API's ordering).
+   const defaultSortRaw = options.defaultSort !== undefined
+     ? options.defaultSort
+     : process.env.COMICVINE_DEFAULT_SORT || undefined;
+   // Accept both singular and plural resource keys in the per-resource map
+   // (e.g. { person: "name" } or { people: "name" }); normalize to singular.
+   const pluralToSingular = { ...Object.fromEntries(Object.entries(resources).map(([singular, resource]) => [resource.plural, singular])) };
+   const defaultSort =
+     defaultSortRaw !== undefined && typeof defaultSortRaw === "object" && !Array.isArray(defaultSortRaw)
+       ? { ...defaultSortByResource, ...Object.fromEntries(Object.entries(defaultSortRaw).map(([key, column]) => [pluralToSingular[key] ?? key, column])) }
+       : { ...defaultSortByResource, ...(typeof defaultSortRaw === "string" ? { issue: defaultSortRaw, person: defaultSortRaw, publisher: defaultSortRaw, story_arc: defaultSortRaw, team: defaultSortRaw, volume: defaultSortRaw } : {}) };
 
    // SRV-8: when enabled, detail responses are diffed against the live ComicVine
    // API to verify the bundled data. The live key comes from the environment
@@ -1125,8 +1176,8 @@ function createApiServer(
       return;
       }
 
-     // Only the volume endpoint honors ?sort=; every other list endpoint keeps the
-     // default id ordering (its sortable*Fields allowlist is not wired into the query).
+     // SRV-1: every list endpoint honors ?sort= via its sortable*Fields allowlist;
+     // an absent or unsupported field/direction keeps the default id ordering.
      // COMICVINE_FORCED_LIMIT does not apply to list endpoints, only to search.
      const limit = resolveLimit(requestedLimit, defaultLimit, maxLimit);
      const offset = Number.isFinite(requestedOffset) ? Math.max(requestedOffset, 0) : 0;
@@ -1144,9 +1195,7 @@ function createApiServer(
        ? publisherBlocklistPredicate(config, publisherBlocklist)
        : { clause: "", values: [] };
      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}${blocklist.clause}` : (blocklist.clause ? ` WHERE 1 = 1${blocklist.clause}` : "");
-     const orderBy = resource.singular === "volume"
-      ? parseSort(config, url.searchParams.get("sort"), sortableVolumeFields)
-      : "id ASC";
+     const orderBy = parseSort(config, url.searchParams.get("sort"), sortableFieldsByResource[resource.singular], defaultSort[resource.singular]);
      const total = database.prepare(`SELECT COUNT(*) AS count FROM (${config.subquery}) ${config.alias}${where}`)
       .get(...values, ...blocklist.values).count;
      const rows = database.prepare(

@@ -476,6 +476,53 @@ test("supports people XML and JSONP formats", async () => {
   assert.equal(JSON.parse(jsonpBody.slice("ComicVine.people(".length, -2)).results[0].id, 1251);
 });
 
+test("supports ?sort= on the issues list endpoint (SRV-1)", async () => {
+  // name asc: "Another Issue" (43) before "The Test Issue" (42) alphabetically.
+  const byName = await fetch(`${baseUrl}/api/issues?sort=name:asc&field_list=id,name`);
+  assert.equal(byName.status, 200);
+  assert.deepEqual((await byName.json()).results.map((r) => r.id), [43, 42]);
+
+  // name desc reverses it.
+  const byNameDesc = await fetch(`${baseUrl}/api/issues?sort=name:desc&field_list=id,name`);
+  assert.equal(byNameDesc.status, 200);
+  assert.deepEqual((await byNameDesc.json()).results.map((r) => r.id), [42, 43]);
+
+  // A numeric/date field (issue_number) is a valid sort column and returns 200.
+  const byNumber = await fetch(`${baseUrl}/api/issues?sort=issue_number:asc&field_list=id,issue_number`);
+  assert.equal(byNumber.status, 200);
+  assert.equal((await byNumber.json()).results.length, 2);
+
+  // An unsupported field is rejected with 400.
+  const bad = await fetch(`${baseUrl}/api/issues?sort=not_a_field:asc`);
+  assert.equal(bad.status, 400);
+  assert.match((await bad.json()).error, /Sort/);
+});
+
+test("a no-sort list keeps the default id ordering (SRV-1)", async () => {
+  const people = await fetch(`${baseUrl}/api/people?limit=10&field_list=id,name`);
+  const peopleBody = await people.json();
+  assert.equal(people.status, 200);
+  assert.deepEqual(peopleBody.results.map((r) => r.id), [1251, 1252]);
+});
+
+test("honors the defaultSort option for unsorted list endpoints (SRV-1)", async () => {
+  const srv = createApiServer(databasePath, () => {}, { defaultSort: { people: "name" } });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    // name asc: "Alex Ross" (1252) before "Barry Kitson" (1251).
+    const asc = await fetch(`${url}/api/people?limit=10&field_list=id,name`);
+    assert.equal(asc.status, 200);
+    assert.deepEqual((await asc.json()).results.map((r) => r.id), [1252, 1251]);
+
+    // An explicit ?sort= still wins over the default.
+    const desc = await fetch(`${url}/api/people?sort=name:desc&limit=10&field_list=id,name`);
+    assert.deepEqual((await desc.json()).results.map((r) => r.id), [1251, 1252]);
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+  }
+});
+
 test("serves singular person details with relationship fields", async () => {
   const fields = "id,name,created_characters,issue_credits,story_arc_credits,volume_credits";
   const response = await fetch(`${baseUrl}/api/person/4040-1251/?format=json&field_list=${fields}`);

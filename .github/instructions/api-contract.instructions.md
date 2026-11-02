@@ -63,7 +63,7 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 ## Ordering
 
 - Search: volumes `start_year DESC`, issues numeric `issue_number ASC` (non-numeric specials last, then id), others `id`.
-- List: only volume honors `?sort=` (`parseSort` + `sortableVolumeFields`); all other list endpoints order `id ASC` (SRV-1 in TODO.md tracks wiring the rest).
+- List: every list endpoint honors `?sort=` via `parseSort` + the per-resource allowlist in `sortableFieldsByResource` (`sortableVolumeFields`, `sortableIssueFields`, `sortablePersonFields`, `sortablePublisherFields`, `sortableStoryArcFields`, `sortableTeamFields`). With no `?sort=`, each resource uses its default sort column from `defaultSortByResource` (all `id` ASC by default, matching the live API); the `defaultSort` option on `createApiServer` (a field name or a per-resource map) or `COMICVINE_DEFAULT_SORT` overrides it. An unsupported `?sort=` field/direction → 400.
 
 ## Validation when changing this file
 
