@@ -52,6 +52,7 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 - Each searchable resource matches on its **name** column only. When the resource has a populated FTS5 trigram table (`cv_*_fts`, created by the updater) the query runs as a trigram `MATCH` (`ftsOrLike`); otherwise it falls back to `LIKE lower(?) ESCAPE '\\' COLLATE NOCASE`.
 - The trigram tokenizer is case-insensitive and matches substrings (≥ 3 chars), so the result set matches the legacy `LIKE` behavior; shorter queries always use `LIKE`.
 - `buildResourceConfig` detects each `cv_*_fts` table and exposes `config.ftsTable`/`config.ftsColumns`; an absent or empty index (`COUNT(*) = 0`) disables FTS for that resource, so test fixtures without FTS tables are unaffected.
+- `subscriber_only` is accepted for API compatibility but is **unsupported** (SRV-2): the bundled data has no subscriber flag, so the parameter is ignored and every value returns the same unfiltered results. Do not add filtering logic against it.
 
 ## Per-resource special cases (buildResult / buildResourceConfig)
 

@@ -77,7 +77,7 @@ Person details are available at `/api/person/{id}`. Their `field_list` also supp
 
 Publisher details are available at `/api/publisher/{id}`. Their `field_list` also supports `characters`, `story_arcs`, `teams`, and `volumes`.
 
-Search accepts comma-separated `resources`, matches query text against names only, and supports `field_list` projection. It returns `resource_type` with each hit and supports JSON, XML, and JSONP. Its default limit is 10 and maximum is 100. Resources without a table in `localcv.db` return no search results. `api_key` is ignored by the mock. `subscriber_only` is accepted but has no filtering behavior because its spec does not define the parameter. Responses use ComicVine's `error`, `limit`, `offset`, result-count, `status_code`, and `results` fields.
+Search accepts comma-separated `resources`, matches query text against names only, and supports `field_list` projection. It returns `resource_type` with each hit and supports JSON, XML, and JSONP. Its default limit is 10 and maximum is 100. Resources without a table in `localcv.db` return no search results. `api_key` is ignored by the mock. `subscriber_only` is accepted for API compatibility but is **unsupported**: the bundled data has no subscriber flag to filter on, so the parameter is parsed and then ignored — every value (`true`/`false`) returns the same unfiltered results. Responses use ComicVine's `error`, `limit`, `offset`, result-count, `status_code`, and `results` fields.
 
 ## Syncing Data
 
@@ -129,6 +129,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-11-01 — Document `subscriber_only` as unsupported (SRV-2)
+
+- **Context:** the search endpoint read `subscriber_only` but the bundled `localcv.db` data has no subscriber flag to filter on, so the parameter was a silent no-op and its behavior was undocumented.
+- **Change:** documented `subscriber_only` as **unsupported** rather than sourcing a flag (the live API's subscriber data isn't part of the mock's contract). The search section of this README now states it is accepted for API compatibility but ignored — every value returns the same unfiltered results. The server's search handler comment and the api-contract instructions were updated to match, so a future reader won't mistake the dead parameter for a working filter.
+- **Gotcha / follow-up:** this is documentation only — no behavior changed, so the search result set is identical for any `subscriber_only` value. See `TODO.md` SRV-2.
 
 #### 2026-11-01 — Sortable list endpoints + default sort column (SRV-1)
 

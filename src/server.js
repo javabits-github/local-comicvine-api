@@ -1054,7 +1054,8 @@ function createApiServer(
 
         const { format, callback } = validateFormattedRequest(url);
         const selectedResources = parseSearchResources(url.searchParams.get("resources"), resourceByPath);
-        // subscriber_only is accepted but cannot be applied because the bundled data has no defined flag.
+        // subscriber_only is accepted for API compatibility but intentionally unsupported:
+        // the bundled data has no subscriber flag to filter on, so the parameter is ignored.
         const requestedLimit = Number.parseInt(url.searchParams.get("limit"), 10);
         const requestedOffset = Number.parseInt(url.searchParams.get("offset"), 10);
         const limit = resolveLimit(searchForcedLimit ?? requestedLimit, searchDefaultLimit, maxLimit);
