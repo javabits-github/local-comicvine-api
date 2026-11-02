@@ -1058,3 +1058,92 @@ test("leaves the /api index and /api/status open even when auth is enabled (SRV-
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("is permissive CORS by default when no origins are configured (SRV-14)", async () => {
+    const { dir, dbPath } = makeAuthTestDb();
+    const srv = createApiServer(dbPath, () => {});
+    await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      // A request carrying an Origin still gets the permissive "*" grant.
+      const res = await fetch(`${url}/api/volumes?limit=1`, { headers: { Origin: "http://app.example" } });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("access-control-allow-origin"), "*");
+      assert.equal(res.headers.get("vary"), null);
+
+      // Preflight returns 204 with the permissive grant and the method/header allowlist.
+      const pre = await fetch(`${url}/api/volumes?limit=1`, {
+        method: "OPTIONS",
+        headers: { Origin: "http://app.example" }
+      });
+      assert.equal(pre.status, 204);
+      assert.equal(pre.headers.get("access-control-allow-origin"), "*");
+      assert.match(pre.headers.get("access-control-allow-methods"), /GET/);
+      assert.match(pre.headers.get("access-control-allow-headers"), /X-Api-Key/);
+    } finally {
+      await new Promise((resolve) => srv.close(resolve));
+      rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("restricts CORS to matching origins from an allowlist (SRV-14)", async () => {
+    const { dir, dbPath } = makeAuthTestDb();
+    const srv = createApiServer(dbPath, () => {}, { corsOrigins: ["http://app.example", "http://other.example"] });
+    await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      // A matching Origin is echoed, with Vary: Origin so caches key by origin.
+      const allowed = await fetch(`${url}/api/volumes?limit=1`, { headers: { Origin: "http://app.example" } });
+      assert.equal(allowed.status, 200);
+      assert.equal(allowed.headers.get("access-control-allow-origin"), "http://app.example");
+      assert.equal(allowed.headers.get("vary"), "Origin");
+
+      // A non-matching Origin gets no Access-Control-Allow-Origin grant (only Vary),
+      // so the browser blocks the read even though the response is 200.
+      const denied = await fetch(`${url}/api/volumes?limit=1`, { headers: { Origin: "http://evil.example" } });
+      assert.equal(denied.status, 200);
+      assert.equal(denied.headers.get("access-control-allow-origin"), null);
+      assert.equal(denied.headers.get("vary"), "Origin");
+
+      // No Origin header at all: no Access-Control-Allow-Origin grant, but Vary is
+      // still emitted so a cache keys by Origin (a cross-origin request would differ).
+      const noOrigin = await fetch(`${url}/api/volumes?limit=1`);
+      assert.equal(noOrigin.status, 200);
+      assert.equal(noOrigin.headers.get("access-control-allow-origin"), null);
+      assert.equal(noOrigin.headers.get("vary"), "Origin");
+
+      // Preflight honors the same allowlist.
+      const pre = await fetch(`${url}/api/volumes?limit=1`, {
+        method: "OPTIONS",
+        headers: { Origin: "http://app.example" }
+      });
+      assert.equal(pre.status, 204);
+      assert.equal(pre.headers.get("access-control-allow-origin"), "http://app.example");
+    } finally {
+      await new Promise((resolve) => srv.close(resolve));
+      rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("applies the configured CORS grant to XML and JSONP responses (SRV-14)", async () => {
+    const { dir, dbPath } = makeAuthTestDb();
+    const srv = createApiServer(dbPath, () => {}, { corsOrigins: ["http://app.example"] });
+    await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      const xml = await fetch(`${url}/api/volume/7300/?format=xml`, { headers: { Origin: "http://app.example" } });
+      assert.equal(xml.status, 200);
+      assert.equal(xml.headers.get("access-control-allow-origin"), "http://app.example");
+
+      const denXml = await fetch(`${url}/api/volume/7300/?format=xml`, { headers: { Origin: "http://evil.example" } });
+      assert.equal(denXml.status, 200);
+      assert.equal(denXml.headers.get("access-control-allow-origin"), null);
+
+      const jsonp = await fetch(`${url}/api/volume/7300/?format=jsonp&json_callback=cb`, { headers: { Origin: "http://app.example" } });
+      assert.equal(jsonp.status, 200);
+      assert.equal(jsonp.headers.get("access-control-allow-origin"), "http://app.example");
+    } finally {
+      await new Promise((resolve) => srv.close(resolve));
+      rmSync(dir, { recursive: true, force: true });
+    }
+});

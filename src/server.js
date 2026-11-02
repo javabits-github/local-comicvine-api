@@ -410,9 +410,36 @@ function createResourceMap(database) {
   return resourceByPath;
 }
 
+// SRV-14: the CORS headers to send with a response. The request handler stashes
+// the computed headers on the response object (see corsHeaders); when absent
+// (defensive default) it falls back to the permissive "*" the server always sent.
+function corsHeadersFor(response) {
+  return response.__corsHeaders ?? { "Access-Control-Allow-Origin": "*" };
+}
+
+// SRV-14: build the CORS headers for a request. `corsOrigins` is the configured
+// allowlist (an array of origins, or a comma/whitespace-separated string).
+//  - No allowlist set (empty): permissive "*" — the current default, fine for
+//    local dev, mirroring how the live API answers browsers.
+//  - Allowlist set: echo the request's Origin only when it matches (plus
+//    `Vary: Origin` so caches key by origin); omit the header entirely when it
+//    does not match, so non-allowed origins get no CORS grant.
+function corsHeaders(request, corsOrigins) {
+  const allowlist = parseKeyList(corsOrigins);
+  const origin = request.headers["origin"];
+  if (allowlist.length === 0) return { "Access-Control-Allow-Origin": "*" };
+  if (typeof origin === "string" && origin && allowlist.includes(origin)) {
+    return {
+      "Access-Control-Allow-Origin": origin,
+      Vary: "Origin"
+    };
+  }
+  return { Vary: "Origin" };
+}
+
 function sendJson(response, statusCode, body) {
   response.writeHead(statusCode, {
-    "Access-Control-Allow-Origin": "*",
+    ...corsHeadersFor(response),
     "Content-Type": "application/json; charset=utf-8"
   });
   response.end(JSON.stringify(body));
@@ -441,7 +468,7 @@ function sendFormattedResponse(response, body, format, callback, resultItemName 
     };
 
     response.writeHead(200, {
-      "Access-Control-Allow-Origin": "*",
+      ...corsHeadersFor(response),
       "Content-Type": "application/xml; charset=utf-8"
     });
     response.end(`<?xml version="1.0" encoding="UTF-8"?>${toXml("response", body)}`);
@@ -450,7 +477,7 @@ function sendFormattedResponse(response, body, format, callback, resultItemName 
 
   if (format === "jsonp") {
     response.writeHead(200, {
-      "Access-Control-Allow-Origin": "*",
+      ...corsHeadersFor(response),
       "Content-Type": "application/javascript; charset=utf-8"
     });
     response.end(`${callback}(${JSON.stringify(body)});`);
@@ -781,6 +808,17 @@ function createApiServer(
        : process.env.COMICVINE_API_KEYS
    ));
 
+   // SRV-14: configurable CORS. `options.corsOrigins` is an array of allowed
+   // origins (or a comma/whitespace-separated string); when unset it falls back
+   // to the COMICVINE_CORS_ORIGINS env var. An EMPTY allowlist is the default and
+   // means permissive "*" (the previous behavior, suitable for local dev). When
+   // one or more origins are set, only matching request Origins are echoed.
+   const corsOrigins = parseKeyList(
+     options.corsOrigins !== undefined
+       ? (Array.isArray(options.corsOrigins) ? options.corsOrigins.join(",") : options.corsOrigins)
+       : process.env.COMICVINE_CORS_ORIGINS
+   );
+
    // SRV-8: when enabled, detail responses are diffed against the live ComicVine
    // API to verify the bundled data. The live key comes from the environment
    // (COMICVINE_API_KEY); without it the validator cannot run and is skipped.
@@ -828,6 +866,9 @@ function createApiServer(
       }
     }
     const durationMs = () => Date.now() - startedAt;
+    // SRV-14: compute the CORS headers once per request and stash them on the
+    // response so every sendJson/sendFormattedResponse below can merge them in.
+    response.__corsHeaders = corsHeaders(request, corsOrigins);
     response.once("finish", () => {
       const status = response.statusCode;
       const key = endpointKey(requestPath);
@@ -848,8 +889,9 @@ function createApiServer(
     if (request.method === "OPTIONS") {
       // SRV-13: allow the credential headers the auth check accepts, so a
       // browser client can preflight a request that carries an API key.
+      // SRV-14: the origin grant comes from the computed CORS headers above.
       response.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
+        ...response.__corsHeaders,
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, X-Api-Key, Authorization"
       });
