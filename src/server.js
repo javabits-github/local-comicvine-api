@@ -909,6 +909,14 @@ function createApiServer(
    const logMaxFiles = positiveInt(options.logMaxFiles ?? process.env.COMICVINE_LOG_MAX_FILES, 5);
    const fileLogger = logFilePath ? createRotatingFileLogger(logFilePath, logMaxSize, logMaxFiles) : null;
 
+   // SRV-16: log the serialized response body with each request line, off by
+   // default. `options.logResponses` (boolean) or COMICVINE_LOG_RESPONSES
+   // (any non-empty value) enables it; the body is appended to the per-request
+   // "finish" log line as `response_body`, truncated to `logResponseMaxLength`
+   // (COMICVINE_LOG_RESPONSE_MAX_LENGTH, default 10000) to keep lines bounded.
+   const logResponses = Boolean(options.logResponses ?? process.env.COMICVINE_LOG_RESPONSES);
+   const logResponseMaxLength = positiveInt(options.logResponseMaxLength ?? process.env.COMICVINE_LOG_RESPONSE_MAX_LENGTH, 10000);
+
    // Central log sink: stamps an ISO-8601 timestamp and a level (defaulting to
    // "info") on every entry, applies the level threshold, then delegates to the
    // configured logger (stdout/stderr) and, when enabled, the rotating file.
@@ -933,6 +941,34 @@ function createApiServer(
     // SRV-14: compute the CORS headers once per request and stash them on the
     // response so every sendJson/sendFormattedResponse below can merge them in.
     response.__corsHeaders = corsHeaders(request, corsOrigins);
+    // SRV-16: when response-body logging is enabled, buffer the emitted body
+    // (the chunks written before `end`) so the per-request "finish" line can
+    // include it. Off by default, so this captures nothing for normal requests.
+    if (logResponses) {
+      const chunks = [];
+      let length = 0;
+      const originalWrite = response.write.bind(response);
+      response.write = (chunk, ...args) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        length += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+        return originalWrite(chunk, ...args);
+      };
+      const originalEnd = response.end.bind(response);
+      response.end = (chunk, ...args) => {
+        if (chunk !== undefined && chunk !== null) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          chunks.push(buf);
+          length += buf.length;
+        }
+        return originalEnd(chunk, ...args);
+      };
+      response.__responseBody = () => {
+        const full = Buffer.concat(chunks);
+        const truncated = full.length > logResponseMaxLength;
+        const text = full.slice(0, logResponseMaxLength).toString("utf8");
+        return truncated ? `${text}…[truncated ${full.length - logResponseMaxLength} of ${full.length} bytes]` : text;
+      };
+    }
     response.once("finish", () => {
       const status = response.statusCode;
       const key = endpointKey(requestPath);
@@ -941,13 +977,15 @@ function createApiServer(
       entry.status_codes[status] = (entry.status_codes[status] ?? 0) + 1;
       entry.duration_sum_ms += durationMs();
       requestStats.set(key, entry);
-      log("info", {
+      const entryBody = {
         method: request.method,
         path: requestPath,
         query: requestUrl.searchParams.toString(),
         status,
         duration_ms: durationMs()
-      });
+      };
+      if (logResponses) entryBody.response_body = response.__responseBody ? response.__responseBody() : "";
+      log("info", entryBody);
     });
 
     if (request.method === "OPTIONS") {
@@ -1252,7 +1290,11 @@ if (require.main === module) {
     // SRV-13: COMICVINE_API_KEYS enables incoming-request key authentication for
     // resource endpoints. When unset the server stays open (local default).
   if (process.env.COMICVINE_API_KEYS) options.apiKeys = process.env.COMICVINE_API_KEYS;
-  const server = createApiServer(databasePath, undefined, options);
+    // SRV-16: COMICVINE_LOG_RESPONSES logs each request's serialized response body
+    // (truncated to COMICVINE_LOG_RESPONSE_MAX_LENGTH). Off by default.
+    if (process.env.COMICVINE_LOG_RESPONSES) options.logResponses = true;
+    if (process.env.COMICVINE_LOG_RESPONSE_MAX_LENGTH) options.logResponseMaxLength = process.env.COMICVINE_LOG_RESPONSE_MAX_LENGTH;
+    const server = createApiServer(databasePath, undefined, options);
   server.listen(port, host, () => {
     defaultLogger({ type: "startup", level: "info", message: `listening at http://${host}:${port}`, timestamp: new Date().toISOString() });
   });

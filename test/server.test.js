@@ -693,6 +693,58 @@ test("rotates the log file when it exceeds the size limit", async () => {
   }
 });
 
+test("logs the serialized response body when response-body logging is enabled (SRV-16)", async () => {
+  const entries = [];
+  const bodyServer = createApiServer(databasePath, (entry) => entries.push(entry), {
+    logResponses: true
+  });
+  await new Promise((resolve) => bodyServer.listen(0, "127.0.0.1", resolve));
+  const bodyUrl = `http://127.0.0.1:${bodyServer.address().port}`;
+
+  try {
+    await fetch(`${bodyUrl}/api/volume/4050-7300?field_list=id`);
+    const entry = entries.at(-1);
+    assert.equal(entry.path, "/api/volume/4050-7300");
+    // The emitted body is captured and embedded in the log line.
+    assert.ok(entry.response_body, "expected a captured response body");
+    assert.match(entry.response_body, /"id":7300/);
+  } finally {
+    await new Promise((resolve) => bodyServer.close(resolve));
+  }
+
+  // Off by default: with the flag unset the per-request line has no body field.
+  const quietEntries = [];
+  const quietServer = createApiServer(databasePath, (entry) => quietEntries.push(entry));
+  await new Promise((resolve) => quietServer.listen(0, "127.0.0.1", resolve));
+  const quietUrl = `http://127.0.0.1:${quietServer.address().port}`;
+  try {
+    await fetch(`${quietUrl}/api/volume/4050-7300?field_list=id`);
+    assert.equal(Object.hasOwn(quietEntries.at(-1), "response_body"), false);
+  } finally {
+    await new Promise((resolve) => quietServer.close(resolve));
+  }
+});
+
+test("truncates an over-long logged response body to the configured cap (SRV-16)", async () => {
+  const entries = [];
+  const bodyServer = createApiServer(databasePath, (entry) => entries.push(entry), {
+    logResponses: true,
+    logResponseMaxLength: 10
+  });
+  await new Promise((resolve) => bodyServer.listen(0, "127.0.0.1", resolve));
+  const bodyUrl = `http://127.0.0.1:${bodyServer.address().port}`;
+
+  try {
+    await fetch(`${bodyUrl}/api/volume/4050-7300?field_list=id`);
+    const entry = entries.at(-1);
+    // The body is capped at the configured byte length, with a truncation note.
+    assert.ok(entry.response_body.length <= 10 + 64, `body not truncated: ${entry.response_body}`);
+    assert.match(entry.response_body, /truncated/);
+  } finally {
+    await new Promise((resolve) => bodyServer.close(resolve));
+  }
+});
+
 test("serves normalized localcv tables and reports missing resources cleanly", async () => {
   const localDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-localcv-test-"));
   const localDatabasePath = path.join(localDirectory, "localcv.db");
