@@ -69,4 +69,4 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 
 ## Validation when changing this file
 
-Run `npm test` (38 tests) — the suite in `test/server.test.js` pins the envelope, field_list, filter, sort, forced-limit, and FTS search behavior.
+Run `npm test` (58 tests) — the suite in `test/server.test.js` pins the envelope, field_list, filter, sort, forced-limit, and FTS search behavior.
