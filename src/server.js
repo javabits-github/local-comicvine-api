@@ -917,6 +917,34 @@ function createApiServer(
    const logResponses = Boolean(options.logResponses ?? process.env.COMICVINE_LOG_RESPONSES);
    const logResponseMaxLength = positiveInt(options.logResponseMaxLength ?? process.env.COMICVINE_LOG_RESPONSE_MAX_LENGTH, 10000);
 
+   // SRV-17: log the SQL executed to build a response, off by default. Each
+   // request's queries (the list/search SELECT plus the COUNT) are recorded with
+   // their bound values and emitted as `sql` in the per-request "finish" line;
+   // the serialized array is truncated to `logSqlMaxLength`
+   // (COMICVINE_LOG_SQL_MAX_LENGTH, default 20000) to keep lines bounded.
+   const logSql = Boolean(options.logSql ?? process.env.COMICVINE_LOG_SQL);
+   const logSqlMaxLength = positiveInt(options.logSqlMaxLength ?? process.env.COMICVINE_LOG_SQL_MAX_LENGTH, 20000);
+   // Per-request SQL capture. When the flag is on, `database` is wrapped so every
+   // statement run during a request is appended to that request's `__sql` array.
+   // `currentResponse` is set per-request in the handler below (the wrapper is built
+   // before any request exists, so it reads the current response at call time).
+   let currentResponse = null;
+   const wrappedDatabase = logSql
+     ? {
+         prepare: (sql) => {
+           const statement = database.prepare(sql);
+           const record = (...params) => {
+             if (currentResponse?.__sql) currentResponse.__sql.push({ sql, params });
+           };
+           return {
+             get: (...params) => { record(...params); return statement.get(...params); },
+             all: (...params) => { record(...params); return statement.all(...params); },
+             run: (...params) => { record(...params); return statement.run(...params); }
+           };
+         }
+       }
+     : database;
+
    // Central log sink: stamps an ISO-8601 timestamp and a level (defaulting to
    // "info") on every entry, applies the level threshold, then delegates to the
    // configured logger (stdout/stderr) and, when enabled, the rotating file.
@@ -941,6 +969,12 @@ function createApiServer(
     // SRV-14: compute the CORS headers once per request and stash them on the
     // response so every sendJson/sendFormattedResponse below can merge them in.
     response.__corsHeaders = corsHeaders(request, corsOrigins);
+    // SRV-17: when SQL logging is enabled, collect the queries run for this
+    // request so the per-request "finish" line can include them.
+    if (logSql) {
+      response.__sql = [];
+      currentResponse = response;
+    }
     // SRV-16: when response-body logging is enabled, buffer the emitted body
     // (the chunks written before `end`) so the per-request "finish" line can
     // include it. Off by default, so this captures nothing for normal requests.
@@ -985,6 +1019,12 @@ function createApiServer(
         duration_ms: durationMs()
       };
       if (logResponses) entryBody.response_body = response.__responseBody ? response.__responseBody() : "";
+      if (logSql && response.__sql) {
+        const serialized = JSON.stringify(response.__sql);
+        entryBody.sql = serialized.length > logSqlMaxLength
+          ? serialized.slice(0, logSqlMaxLength) + `…[truncated ${serialized.length - logSqlMaxLength} of ${serialized.length} chars]`
+          : serialized;
+      }
       log("info", entryBody);
     });
 
@@ -1028,11 +1068,11 @@ function createApiServer(
       // coverage, sync freshness, and per-endpoint request statistics.
       let tables = {};
       try {
-        const rows = database.prepare(
+        const rows = wrappedDatabase.prepare(
           `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cv\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%\\_fts' ESCAPE '\\' ORDER BY name`
         ).all();
         for (const row of rows) {
-          tables[row.name] = database.prepare(`SELECT COUNT(*) AS count FROM ${row.name}`).get().count;
+          tables[row.name] = wrappedDatabase.prepare(`SELECT COUNT(*) AS count FROM ${row.name}`).get().count;
         }
       } catch {
         tables = {};
@@ -1040,7 +1080,7 @@ function createApiServer(
       let sync_metadata = [];
       try {
         if (tableColumns(database, "cv_sync_metadata").size > 0) {
-          sync_metadata = database.prepare(
+          sync_metadata = wrappedDatabase.prepare(
             `SELECT endpoint, last_sync_date, last_sync_timestamp FROM cv_sync_metadata ORDER BY endpoint`
           ).all();
         }
@@ -1143,7 +1183,7 @@ function createApiServer(
         const blocklist = config.singular === "volume"
           ? publisherBlocklistPredicate(config, publisherBlocklist)
           : { clause: "", values: [] };
-        const matched = database.prepare(
+        const matched = wrappedDatabase.prepare(
           `SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${nameMatch.clause}${blocklist.clause} ORDER BY ${orderBy}`
            ).all(...nameMatch.values, ...blocklist.values);
         total += matched.length;
@@ -1182,7 +1222,7 @@ function createApiServer(
          return;
         }
 
-      const row = database.prepare(`SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${config.alias}.id = ?`)
+      const row = wrappedDatabase.prepare(`SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${config.alias}.id = ?`)
           .get(id);
       if (!row) {
          const notFound = {
@@ -1248,9 +1288,9 @@ function createApiServer(
        : { clause: "", values: [] };
      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}${blocklist.clause}` : (blocklist.clause ? ` WHERE 1 = 1${blocklist.clause}` : "");
      const orderBy = parseSort(config, url.searchParams.get("sort"), sortableFieldsByResource[resource.singular], defaultSort[resource.singular]);
-     const total = database.prepare(`SELECT COUNT(*) AS count FROM (${config.subquery}) ${config.alias}${where}`)
+     const total = wrappedDatabase.prepare(`SELECT COUNT(*) AS count FROM (${config.subquery}) ${config.alias}${where}`)
       .get(...values, ...blocklist.values).count;
-     const rows = database.prepare(
+     const rows = wrappedDatabase.prepare(
       `SELECT * FROM (${config.subquery}) ${config.alias}${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`
       ).all(...values, ...blocklist.values, limit, offset);
      const results = rows.map((row) => {
@@ -1294,6 +1334,10 @@ if (require.main === module) {
     // (truncated to COMICVINE_LOG_RESPONSE_MAX_LENGTH). Off by default.
     if (process.env.COMICVINE_LOG_RESPONSES) options.logResponses = true;
     if (process.env.COMICVINE_LOG_RESPONSE_MAX_LENGTH) options.logResponseMaxLength = process.env.COMICVINE_LOG_RESPONSE_MAX_LENGTH;
+    // SRV-17: COMICVINE_LOG_SQL logs the SQL executed to build each response
+    // (truncated to COMICVINE_LOG_SQL_MAX_LENGTH). Off by default.
+    if (process.env.COMICVINE_LOG_SQL) options.logSql = true;
+    if (process.env.COMICVINE_LOG_SQL_MAX_LENGTH) options.logSqlMaxLength = process.env.COMICVINE_LOG_SQL_MAX_LENGTH;
     const server = createApiServer(databasePath, undefined, options);
   server.listen(port, host, () => {
     defaultLogger({ type: "startup", level: "info", message: `listening at http://${host}:${port}`, timestamp: new Date().toISOString() });

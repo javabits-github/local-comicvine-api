@@ -745,6 +745,62 @@ test("truncates an over-long logged response body to the configured cap (SRV-16)
   }
 });
 
+test("logs the executed SQL when SQL logging is enabled (SRV-17)", async () => {
+  const entries = [];
+  const sqlServer = createApiServer(databasePath, (entry) => entries.push(entry), {
+    logSql: true
+  });
+  await new Promise((resolve) => sqlServer.listen(0, "127.0.0.1", resolve));
+  const sqlUrl = `http://127.0.0.1:${sqlServer.address().port}`;
+
+  try {
+    await fetch(`${sqlUrl}/api/volumes?filter=id:7300`);
+    const entry = entries.at(-1);
+    assert.equal(entry.path, "/api/volumes");
+    // The recorded SQL is a JSON array of { sql, params } entries.
+    const recorded = JSON.parse(entry.sql);
+    assert.ok(Array.isArray(recorded) && recorded.length > 0, "expected recorded SQL");
+    assert.ok(recorded.some((q) => q.sql.includes("cv_volume")), "expected a cv_volume query");
+    // Bound values are captured alongside the SQL.
+    const idQuery = recorded.find((q) => q.sql.includes("IN (") || q.sql.includes("id"));
+    assert.ok(idQuery, "expected the id-filter query");
+    assert.ok(idQuery.params.some((p) => String(p) === "7300"), "expected the bound id value");
+  } finally {
+    await new Promise((resolve) => sqlServer.close(resolve));
+  }
+
+  // Off by default: with the flag unset the per-request line has no sql field.
+  const quietEntries = [];
+  const quietServer = createApiServer(databasePath, (entry) => quietEntries.push(entry));
+  await new Promise((resolve) => quietServer.listen(0, "127.0.0.1", resolve));
+  const quietUrl = `http://127.0.0.1:${quietServer.address().port}`;
+  try {
+    await fetch(`${quietUrl}/api/volumes?filter=id:7300`);
+    assert.equal(Object.hasOwn(quietEntries.at(-1), "sql"), false);
+  } finally {
+    await new Promise((resolve) => quietServer.close(resolve));
+  }
+});
+
+test("truncates an over-long logged SQL to the configured cap (SRV-17)", async () => {
+  const entries = [];
+  const sqlServer = createApiServer(databasePath, (entry) => entries.push(entry), {
+    logSql: true,
+    logSqlMaxLength: 10
+  });
+  await new Promise((resolve) => sqlServer.listen(0, "127.0.0.1", resolve));
+  const sqlUrl = `http://127.0.0.1:${sqlServer.address().port}`;
+
+  try {
+    await fetch(`${sqlUrl}/api/volumes?filter=id:7300`);
+    const entry = entries.at(-1);
+    assert.match(entry.sql, /truncated/);
+    assert.ok(entry.sql.length < 10 + 64, `sql not truncated: ${entry.sql.length}`);
+  } finally {
+    await new Promise((resolve) => sqlServer.close(resolve));
+  }
+});
+
 test("serves normalized localcv tables and reports missing resources cleanly", async () => {
   const localDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-localcv-test-"));
   const localDatabasePath = path.join(localDirectory, "localcv.db");
