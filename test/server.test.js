@@ -244,6 +244,28 @@ test("supports volume field selection, sorting, and date range filters", async (
   assert.deepEqual(filteredBody.results, [{ id: 7300 }]);
 });
 
+test("supports volume multi-id filters (pipe-separated) and keeps single-id exact match", async () => {
+  // Two real ids match both rows.
+  const both = await (await fetch(`${baseUrl}/api/volumes?filter=id:7300%7C7301&field_list=id`)).json();
+  assert.equal(both.number_of_total_results, 2);
+  assert.deepEqual(new Set(both.results.map((v) => v.id)), new Set([7300, 7301]));
+
+  // A list containing one real id and one absent id matches only the real one.
+  const some = await (await fetch(`${baseUrl}/api/volumes?filter=id:7300%7C99999&field_list=id`)).json();
+  assert.equal(some.number_of_total_results, 1);
+  assert.deepEqual(some.results, [{ id: 7300 }]);
+
+  // A single id stays an exact match (not a range, not a LIKE).
+  const single = await (await fetch(`${baseUrl}/api/volumes?filter=id:7300&field_list=id`)).json();
+  assert.equal(single.number_of_total_results, 1);
+  assert.deepEqual(single.results, [{ id: 7300 }]);
+
+  // Non-numeric tokens in the list are not treated as ids; the value falls back
+  // to a single exact match (which matches nothing for a non-numeric string).
+  const nonNumeric = await (await fetch(`${baseUrl}/api/volumes?filter=id:7300%7Cabc&field_list=id`)).json();
+  assert.equal(nonNumeric.number_of_total_results, 0);
+});
+
 test("supports volume JSON, XML, and JSONP formats", async () => {
   const xml = await fetch(`${baseUrl}/api/volumes?limit=1&format=xml`);
   assert.match(xml.headers.get("content-type"), /application\/xml/);

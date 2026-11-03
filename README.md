@@ -67,7 +67,7 @@ GET /api/status/
 
 `/api/status` is a local-only endpoint (not part of the live ComicVine API). It reports the row count of every `cv_*` table, the `cv_sync_metadata` last-sync date and timestamp per endpoint, and per-endpoint request statistics (request counts, status-code breakdown, average duration) accumulated since the server started, plus the total request count.
 
-Volume details are available at `/api/volume/{id}`. Their `field_list` also supports `character_credits`, `concept_credits`, `location_credits`, `object_credits`, `person_credits`, and `team_credits`. For JSONP, provide `format=jsonp` and `json_callback=Your.callback`. Volume filters accept comma-separated `field:value` expressions or `field:start|end` date ranges.
+Volume details are available at `/api/volume/{id}`. Their `field_list` also supports `character_credits`, `concept_credits`, `location_credits`, `object_credits`, `person_credits`, and `team_credits`. For JSONP, provide `format=jsonp` and `json_callback=Your.callback`. Volume filters accept comma-separated `field:value` expressions or `field:start|end` date ranges. The `id` field is special: a single value is an exact match, and a pipe-separated list of all-numeric ids (`?filter=id:59366|85128|…`) matches any of them via `IN (…)` — ids are never treated as a range.
 
 The publishers collection is available at `/api/publishers`. Its `field_list` supports `aliases`, `api_detail_url`, `date_added`, `date_last_updated`, `deck`, `description`, `id`, `image`, `location_address`, `location_city`, `location_state`, `name`, and `site_detail_url`.
 
@@ -129,6 +129,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-11-02 — Multi-id filter on list endpoints (SRV-15)
+
+- **Context:** a client wanted to fetch several volumes in one request with `?filter=id:59366|85128|…`. The volume `id` filter was a single exact match (`id = ?`), and `|` was already reserved for an inclusive range (`field:start|end` → `col >= ? AND col <= ?`), so a pipe list of ids was misread as a range.
+- **Change:** in `parseFilters` in [src/server.js](src/server.js), the volume `id` branch now runs **before** the range branch: a pipe-separated list of all-numeric ids builds `id IN (?, ?, …)` with each token bound as a parameter, while a single value stays `id = ?`. Non-numeric tokens (or a lone value) fall back to the exact match so a typo like `id:7300|abc` matches nothing rather than a range.
+- **Gotcha / follow-up:** the branch ordering is the whole fix — the range check `range.length === 2` must come after the id check, or a two-element id list still becomes a range. The `IN` is fully parameterized (no string interpolation of the ids), so there is no injection risk; a very long id list is bounded only by the URL length, which is acceptable for a local mirror. See `TODO.md` SRV-15.
 
 #### 2026-11-01 — Document `subscriber_only` as unsupported (SRV-2)
 

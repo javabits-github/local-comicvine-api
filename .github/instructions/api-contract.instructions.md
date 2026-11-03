@@ -43,6 +43,7 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 
 - Comma-separated `field:value` terms; `field:start|end` is an inclusive range.
 - Single values are `LIKE '%value%' COLLATE NOCASE`, **except volume `id` which is exact `=` match**.
+- **SRV-15:** volume `id` is checked **before** the range branch. A pipe-separated list of all-numeric ids (`id:1|2|3`) builds `id IN (…)` (each token parameterized); a single value stays `id = ?`; non-numeric tokens fall back to the exact match (matches nothing). Ids are never treated as a range.
 - **SRV-5:** a single-value text field (`name`/`aliases`/`deck`/`description`) is matched against the resource's FTS5 trigram index (`ftsOrLike`) when that index exists and the value is ≥ 3 characters; otherwise it falls back to the `LIKE` clause above.
 - Issue `volume`/`volume_id` filters resolve to the joined volume id (accepts `4050-7300` or bare number).
 - Unknown fields match nothing (`1 = 0`); malformed filters → 400.

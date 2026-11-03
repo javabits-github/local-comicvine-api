@@ -570,14 +570,27 @@ function parseFilters(filter, config) {
     continue;
    }
    const column = expressionRef.expression;
-   const range = match[2].split("|");
+   const raw = match[2];
+   if (config.singular === "volume" && field.toLowerCase() === "id") {
+    // Volume id filters are exact matches, not partial LIKE matches. A
+    // pipe-separated list of all-numeric ids (filter=id:1|2|3) matches any of
+    // them via IN (...) — SRV-15. A single value stays an exact match. This
+    // branch is checked before the numeric range branch because ids are
+    // never a range.
+    const ids = raw.split("|").map((token) => token.trim()).filter(Boolean);
+    if (ids.length > 1 && ids.every((token) => /^\d+$/.test(token))) {
+      clauses.push(`${column} IN (${ids.map(() => "?").join(", ")})`);
+      values.push(...ids);
+    } else {
+      clauses.push(`${column} = ?`);
+      values.push(raw.trim());
+    }
+    continue;
+   }
+   const range = raw.split("|");
    if (range.length === 2) {
      clauses.push(`${column} >= ? AND ${column} <= ?`);
      values.push(range[0].trim(), range[1].trim());
-   } else if (config.singular === "volume" && field.toLowerCase() === "id") {
-    // Volume id filters are exact matches, not partial LIKE matches.
-    clauses.push(`${column} = ?`);
-    values.push(match[2].trim());
    } else {
     // SRV-5: single-value text filters use the FTS trigram index when available;
     // shorter values (< 3 chars) and non-text fields keep the LIKE partial match.
