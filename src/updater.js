@@ -152,6 +152,11 @@ class ComicVineUpdater {
       this.conn = new DatabaseSync(this.dbPath);
       this.conn.exec("PRAGMA journal_mode=WAL");
       this.conn.exec("PRAGMA synchronous=NORMAL");
+      // Enforce FKs on this connection. The live API returns ids for volumes
+      // that have no local row (the DB is a synced subset), and node:sqlite
+      // only throws FOREIGN KEY constraint failed when the pragma is ON, so
+      // enabling it makes every upsert validate its FK references.
+      this.conn.exec("PRAGMA foreign_keys=ON");
       this.log(`Connected to database: ${this.dbPath}`);
       return true;
     } catch (e) {
@@ -164,6 +169,71 @@ class ComicVineUpdater {
     if (this.conn) {
       this.conn.close();
       this.conn = null;
+    }
+  }
+
+  // Executes a statement, and on a FOREIGN KEY constraint failure logs exactly
+  // which row/SQL/value caused it: the FK definition (PRAGMA
+  // foreign_key_list), the FK's bound value, the full statement, and every
+  // bound parameter. Dumps the offending row to sync_errors so there is a
+  // persistent record, then rethrows so callers can continue/skip as before.
+  runWithFkDiagnostics(table, sql, params, context) {
+    try {
+      return this.conn.prepare(sql).run(...params);
+    } catch (e) {
+      if (!/FOREIGN KEY constraint failed/i.test(e.message)) throw e;
+      this.log(`  FK CONSTRAINT FAILED upserting ${table} (${context})`, { force: true });
+      this.log(`    SQL: ${sql.replace(/\s+/g, " ").trim()}`, { force: true });
+      this.log(`    Params: ${JSON.stringify(params)}`, { force: true });
+      let fk = [];
+      try {
+        fk = this.conn.prepare(`PRAGMA foreign_key_list(${table})`).all();
+      } catch {
+        // Table may not exist / no FKs — diagnostics still work with empty list.
+      }
+      // Map column name -> parameter index in the upsert, by counting the ?
+      // placeholders that precede each column name in the column list.
+      const upsertSql = sql.replace(/\s+/g, " ").trim();
+      const cols = (() => {
+        try { return this.conn.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name); }
+        catch { return []; }
+      })();
+      const colParamPos = {};
+      for (const col of cols) {
+        const idx = upsertSql.indexOf(col);
+        if (idx >= 0) colParamPos[col] = (upsertSql.slice(0, idx).match(/\?/g) || []).length;
+      }
+      for (const f of fk) {
+        const paramPos = f.from in colParamPos ? colParamPos[f.from] : -1;
+        const refKey = paramPos >= 0 && paramPos < params.length ? params[paramPos] : undefined;
+        let refRow = null;
+        if (refKey != null) {
+          try {
+            refRow = this.conn.prepare(`SELECT id, name FROM ${f.table} WHERE id = ?`).get(refKey);
+          } catch {
+            try { refRow = this.conn.prepare(`SELECT id FROM ${f.table} WHERE id = ?`).get(refKey); }
+            catch { refRow = null; }
+          }
+        }
+        this.log(
+          `    FK: ${table}.${f.from} -> ${f.table}.${f.to}; value=${JSON.stringify(refKey)}; ` +
+          `referenced row ${refRow ? `exists (id=${refRow.id}, name=${refRow.name})` : "MISSING locally"}`,
+          { force: true }
+        );
+      }
+      try {
+        this.conn.prepare(
+          `INSERT INTO sync_errors (table_name, action, error, row_data, created_at)
+           VALUES (?, 'upsert', ?, ?, ?)`
+        ).run(
+          table, e.message,
+          JSON.stringify({ context, params }),
+          new Date().toISOString()
+        );
+      } catch {
+        this.log("    (could not record row in sync_errors)", { force: true });
+      }
+      throw e;
     }
   }
 
@@ -443,6 +513,17 @@ class ComicVineUpdater {
         last_sync_date TEXT NOT NULL,
         last_sync_timestamp TEXT NOT NULL,
         resume_state TEXT
+      )
+    `);
+    // Persistent record of rows the updater could not store (FK failures etc.)
+    this.conn.exec(`
+      CREATE TABLE IF NOT EXISTS sync_errors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        table_name TEXT NOT NULL,
+        action TEXT NOT NULL,
+        error TEXT,
+        row_data TEXT,
+        created_at TEXT NOT NULL
       )
     `);
     // Migration: add resume_state column to older DBs
@@ -837,20 +918,17 @@ class ComicVineUpdater {
 
         // SRV-6c: first/last issue live in the join table (the JSON columns were
         // dropped by the backfill). Preserve the live API's key order for output.
-        const upsertIssueRef = this.conn.prepare(`
+        for (const [ref, refType] of [[vol.first_issue, "first"], [vol.last_issue, "last"]]) {
+          if (ref && typeof ref === "object") {
+            this.runWithFkDiagnostics("cv_volume_issue_ref", `
           INSERT INTO cv_volume_issue_ref
             (volume_id, ref_type, issue_id, key_order)
           VALUES (?, ?, ?, ?)
           ON CONFLICT(volume_id, ref_type) DO UPDATE SET
             issue_id = excluded.issue_id,
             key_order = excluded.key_order
-        `);
-        for (const [ref, refType] of [[vol.first_issue, "first"], [vol.last_issue, "last"]]) {
-          if (ref && typeof ref === "object") {
-            upsertIssueRef.run(
-              volId, refType,
-              ref.id ?? null, JSON.stringify(Object.keys(ref))
-            );
+        `, [volId, refType, ref.id ?? null, JSON.stringify(Object.keys(ref))],
+              `volume ${volId} ${refType}_issue ref`);
           }
         }
 
@@ -947,7 +1025,7 @@ class ComicVineUpdater {
 
       const exists = this.conn.prepare("SELECT id FROM cv_issue WHERE id = ?").get(issueId);
 
-      this.conn.prepare(`
+      const issueSql = `
         INSERT OR REPLACE INTO cv_issue
           (id, volume_id, name, issue_number, cover_date, store_date,
            description, image_url, site_detail_url,
@@ -960,7 +1038,8 @@ class ComicVineUpdater {
            first_appearance_objects, first_appearance_storyarcs,
            first_appearance_teams, has_staff_review)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+      `;
+      this.runWithFkDiagnostics("cv_issue", issueSql, [
         issueId, volumeId,
         jsonify(issueData.name), jsonify(issueData.issue_number),
         jsonify(issueData.cover_date), jsonify(issueData.store_date),
@@ -986,7 +1065,7 @@ class ComicVineUpdater {
         JSON.stringify(issueData.first_appearance_storyarcs || []),
         JSON.stringify(issueData.first_appearance_teams || []),
         jsonify(issueData.has_staff_review)
-      );
+      ], `issue ${issueId} (${issueData.name})`);
 
       if (exists) this.stats.issues_updated++;
       else this.stats.issues_added++;

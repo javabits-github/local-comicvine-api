@@ -714,7 +714,10 @@ test("logs the serialized response body when response-body logging is enabled (S
 
   // Off by default: with the flag unset the per-request line has no body field.
   const quietEntries = [];
-  const quietServer = createApiServer(databasePath, (entry) => quietEntries.push(entry));
+  const quietServer = createApiServer(databasePath, (entry) => quietEntries.push(entry), {
+    logResponses: false,
+    logSql: false
+  });
   await new Promise((resolve) => quietServer.listen(0, "127.0.0.1", resolve));
   const quietUrl = `http://127.0.0.1:${quietServer.address().port}`;
   try {
@@ -770,8 +773,13 @@ test("logs the executed SQL when SQL logging is enabled (SRV-17)", async () => {
   }
 
   // Off by default: with the flag unset the per-request line has no sql field.
+  // Pass `false` explicitly so the assertion is independent of any ambient
+  // COMICVINE_LOG_RESPONSES / COMICVINE_LOG_SQL in the test process environment.
   const quietEntries = [];
-  const quietServer = createApiServer(databasePath, (entry) => quietEntries.push(entry));
+  const quietServer = createApiServer(databasePath, (entry) => quietEntries.push(entry), {
+    logResponses: false,
+    logSql: false
+  });
   await new Promise((resolve) => quietServer.listen(0, "127.0.0.1", resolve));
   const quietUrl = `http://127.0.0.1:${quietServer.address().port}`;
   try {
