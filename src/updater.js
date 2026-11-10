@@ -668,7 +668,8 @@ class ComicVineUpdater {
         }
 
         if (data.status_code !== 1) {
-          this.log(`  API error: ${data.error || "Unknown error"}`);
+          const safeUrl = url.replace(/api_key=[^&]*/g, "api_key=***");
+          this.log(`  API error: ${data.error || "Unknown error"} (${safeUrl})`);
           return null;
         }
 
@@ -852,6 +853,87 @@ class ComicVineUpdater {
     this.setEndpointLastSync("people", endDate);
   }
 
+  // Shared volume upsert (used by syncVolumes and by the issue-sync FK
+  // recovery path, which back-fills a missing volume before retrying the issue).
+  // Returns true on success, false if the upsert fails (e.g. missing
+  // cv_volume_issue_ref table in a minimal DB) so callers can skip gracefully.
+  upsertVolume(vol) {
+    const volId = vol.id;
+    if (!volId) return false;
+
+    const image = vol.image || null;
+    const imageUrl = image ? image.original_url : null;
+    const publisher = vol.publisher || null;
+    const publisherId = publisher ? publisher.id : null;
+    const exists = this.conn.prepare("SELECT id FROM cv_volume WHERE id = ?").get(volId);
+
+    try {
+      this.conn.prepare(`
+        INSERT INTO cv_volume
+          (id, name, aliases, start_year, publisher_id, count_of_issues,
+           description, image_url, site_detail_url, api_detail_url,
+           deck, date_added, date_last_updated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          aliases = excluded.aliases,
+          start_year = excluded.start_year,
+          publisher_id = excluded.publisher_id,
+          count_of_issues = excluded.count_of_issues,
+          description = excluded.description,
+          image_url = excluded.image_url,
+          site_detail_url = excluded.site_detail_url,
+          api_detail_url = excluded.api_detail_url,
+          deck = excluded.deck,
+          date_added = excluded.date_added,
+          date_last_updated = excluded.date_last_updated
+      `).run(
+        volId,
+        jsonify(vol.name), jsonify(vol.aliases),
+        jsonify(vol.start_year), publisherId,
+        jsonify(vol.count_of_issues),
+        jsonify(vol.description), imageUrl,
+        vol.site_detail_url, vol.api_detail_url,
+        jsonify(vol.deck), jsonify(vol.date_added),
+        jsonify(vol.date_last_updated)
+      );
+
+      // SRV-6c: first/last issue live in the join table (the JSON columns were
+      // dropped by the backfill). Preserve the live API's key order for output.
+      for (const [ref, refType] of [[vol.first_issue, "first"], [vol.last_issue, "last"]]) {
+        if (ref && typeof ref === "object") {
+          this.runWithFkDiagnostics("cv_volume_issue_ref", `
+        INSERT INTO cv_volume_issue_ref
+          (volume_id, ref_type, issue_id, key_order)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(volume_id, ref_type) DO UPDATE SET
+          issue_id = excluded.issue_id,
+          key_order = excluded.key_order
+      `, [volId, refType, ref.id ?? null, JSON.stringify(Object.keys(ref))],
+            `volume ${volId} ${refType}_issue ref`);
+        }
+      }
+    } catch (e) {
+      this.log(`    ✗ Failed to upsert volume ${volId}: ${e.message}`);
+      return false;
+    }
+
+    if (exists) this.stats.volumes_updated++;
+    else this.stats.volumes_added++;
+    return true;
+  }
+
+  // Fetch a single volume's detail from the live API (mirrors fetchIssueDetails).
+  // Returns the volume object, or null if the API call fails / rate-limits.
+  async fetchVolumeDetails(volumeId) {
+    const fieldList = "id,name,aliases,start_year,publisher,count_of_issues," +
+      "description,image,site_detail_url,api_detail_url,deck," +
+      "date_added,date_last_updated,first_issue,last_issue";
+    const data = await this.apiCall(`volume/4050-${volumeId}/`, { field_list: fieldList });
+    if (data) return data.results;
+    return null;
+  }
+
   async syncVolumes(startDate, endDate, full = false) {
     this.log(`\n--- Syncing Volumes ---${full ? " (FULL)" : ""}`);
     if (!this.conn) return;
@@ -877,63 +959,7 @@ class ComicVineUpdater {
 
       this.conn.exec("BEGIN");
       for (const vol of results) {
-        const volId = vol.id;
-        if (!volId) continue;
-
-        const image = vol.image || null;
-        const imageUrl = image ? image.original_url : null;
-        const publisher = vol.publisher || null;
-        const publisherId = publisher ? publisher.id : null;
-        const exists = this.conn.prepare("SELECT id FROM cv_volume WHERE id = ?").get(volId);
-
-        this.conn.prepare(`
-          INSERT INTO cv_volume
-            (id, name, aliases, start_year, publisher_id, count_of_issues,
-             description, image_url, site_detail_url, api_detail_url,
-             deck, date_added, date_last_updated)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            aliases = excluded.aliases,
-            start_year = excluded.start_year,
-            publisher_id = excluded.publisher_id,
-            count_of_issues = excluded.count_of_issues,
-            description = excluded.description,
-            image_url = excluded.image_url,
-            site_detail_url = excluded.site_detail_url,
-            api_detail_url = excluded.api_detail_url,
-            deck = excluded.deck,
-            date_added = excluded.date_added,
-            date_last_updated = excluded.date_last_updated
-        `).run(
-          volId,
-          jsonify(vol.name), jsonify(vol.aliases),
-          jsonify(vol.start_year), publisherId,
-          jsonify(vol.count_of_issues),
-          jsonify(vol.description), imageUrl,
-          vol.site_detail_url, vol.api_detail_url,
-          jsonify(vol.deck), jsonify(vol.date_added),
-          jsonify(vol.date_last_updated)
-        );
-
-        // SRV-6c: first/last issue live in the join table (the JSON columns were
-        // dropped by the backfill). Preserve the live API's key order for output.
-        for (const [ref, refType] of [[vol.first_issue, "first"], [vol.last_issue, "last"]]) {
-          if (ref && typeof ref === "object") {
-            this.runWithFkDiagnostics("cv_volume_issue_ref", `
-          INSERT INTO cv_volume_issue_ref
-            (volume_id, ref_type, issue_id, key_order)
-          VALUES (?, ?, ?, ?)
-          ON CONFLICT(volume_id, ref_type) DO UPDATE SET
-            issue_id = excluded.issue_id,
-            key_order = excluded.key_order
-        `, [volId, refType, ref.id ?? null, JSON.stringify(Object.keys(ref))],
-              `volume ${volId} ${refType}_issue ref`);
-          }
-        }
-
-        if (exists) this.stats.volumes_updated++;
-        else this.stats.volumes_added++;
+        if (vol.id) this.upsertVolume(vol);
       }
       this.conn.exec("COMMIT");
 
@@ -951,6 +977,63 @@ class ComicVineUpdater {
     const data = await this.apiCall(`issue/4000-${issueId}/`);
     if (data) return data.results;
     return null;
+  }
+
+  // Upsert a single issue. Returns true on success, false if the INSERT
+  // fails (typically a foreign-key constraint, e.g. a missing volume). The FK
+  // failure is surfaced via runWithFkDiagnostics (which logs the failing
+  // row/SQL and records it in sync_errors) and then swallowed here so the
+  // caller can attempt recovery.
+  upsertIssue(issueId, issueData, volumeId) {
+    const issueSql = `
+      INSERT OR REPLACE INTO cv_issue
+        (id, volume_id, name, issue_number, cover_date, store_date,
+         description, image_url, site_detail_url,
+         character_credits, person_credits, team_credits,
+         location_credits, story_arc_credits, associated_images,
+         aliases, api_detail_url, deck, date_added, date_last_updated,
+         object_credits, concept_credits, character_died_in,
+         team_disbanded_in, first_appearance_characters,
+         first_appearance_concepts, first_appearance_locations,
+         first_appearance_objects, first_appearance_storyarcs,
+         first_appearance_teams, has_staff_review)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    const params = [
+      issueId, volumeId,
+      jsonify(issueData.name), jsonify(issueData.issue_number),
+      jsonify(issueData.cover_date), jsonify(issueData.store_date),
+      jsonify(issueData.description),
+      issueData.image ? issueData.image.original_url : null,
+      issueData.site_detail_url,
+      JSON.stringify(issueData.character_credits || []),
+      JSON.stringify(issueData.person_credits || []),
+      JSON.stringify(issueData.team_credits || []),
+      JSON.stringify(issueData.location_credits || []),
+      JSON.stringify(issueData.story_arc_credits || []),
+      JSON.stringify(issueData.associated_images || []),
+      jsonify(issueData.aliases), issueData.api_detail_url,
+      jsonify(issueData.deck), jsonify(issueData.date_added),
+      jsonify(issueData.date_last_updated),
+      JSON.stringify(issueData.object_credits || []),
+      JSON.stringify(issueData.concept_credits || []),
+      JSON.stringify(issueData.character_died_in || []),
+      JSON.stringify(issueData.team_disbanded_in || []),
+      JSON.stringify(issueData.first_appearance_characters || []),
+      JSON.stringify(issueData.first_appearance_concepts || []),
+      JSON.stringify(issueData.first_appearance_locations || []),
+      JSON.stringify(issueData.first_appearance_objects || []),
+      JSON.stringify(issueData.first_appearance_storyarcs || []),
+      JSON.stringify(issueData.first_appearance_teams || []),
+      jsonify(issueData.has_staff_review)
+    ];
+    try {
+      this.runWithFkDiagnostics("cv_issue", issueSql, params, `issue ${issueId} (${issueData.name})`);
+      return true;
+    } catch (e) {
+      this.log(`    ✗ Failed to upsert issue ${issueId}: ${e.message}`);
+      return false;
+    }
   }
 
   async syncIssues(startDate, endDate, full = false) {
@@ -1020,52 +1103,28 @@ class ComicVineUpdater {
 
       const volume = issueData.volume || null;
       const volumeId = volume ? volume.id : null;
-      const image = issueData.image || null;
-      const imageUrl = image ? image.original_url : null;
 
       const exists = this.conn.prepare("SELECT id FROM cv_issue WHERE id = ?").get(issueId);
 
-      const issueSql = `
-        INSERT OR REPLACE INTO cv_issue
-          (id, volume_id, name, issue_number, cover_date, store_date,
-           description, image_url, site_detail_url,
-           character_credits, person_credits, team_credits,
-           location_credits, story_arc_credits, associated_images,
-           aliases, api_detail_url, deck, date_added, date_last_updated,
-           object_credits, concept_credits, character_died_in,
-           team_disbanded_in, first_appearance_characters,
-           first_appearance_concepts, first_appearance_locations,
-           first_appearance_objects, first_appearance_storyarcs,
-           first_appearance_teams, has_staff_review)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `;
-      this.runWithFkDiagnostics("cv_issue", issueSql, [
-        issueId, volumeId,
-        jsonify(issueData.name), jsonify(issueData.issue_number),
-        jsonify(issueData.cover_date), jsonify(issueData.store_date),
-        jsonify(issueData.description), imageUrl,
-        issueData.site_detail_url,
-        JSON.stringify(issueData.character_credits || []),
-        JSON.stringify(issueData.person_credits || []),
-        JSON.stringify(issueData.team_credits || []),
-        JSON.stringify(issueData.location_credits || []),
-        JSON.stringify(issueData.story_arc_credits || []),
-        JSON.stringify(issueData.associated_images || []),
-        jsonify(issueData.aliases), issueData.api_detail_url,
-        jsonify(issueData.deck), jsonify(issueData.date_added),
-        jsonify(issueData.date_last_updated),
-        JSON.stringify(issueData.object_credits || []),
-        JSON.stringify(issueData.concept_credits || []),
-        JSON.stringify(issueData.character_died_in || []),
-        JSON.stringify(issueData.team_disbanded_in || []),
-        JSON.stringify(issueData.first_appearance_characters || []),
-        JSON.stringify(issueData.first_appearance_concepts || []),
-        JSON.stringify(issueData.first_appearance_locations || []),
-        JSON.stringify(issueData.first_appearance_objects || []),
-        JSON.stringify(issueData.first_appearance_storyarcs || []),
-        JSON.stringify(issueData.first_appearance_teams || []),
-        jsonify(issueData.has_staff_review)
-      ], `issue ${issueId} (${issueData.name})`);
+      // UPD-4: if the upsert fails on a foreign-key constraint (e.g. the
+      // issue's volume isn't in the local DB yet), back-fill the missing
+      // volume from the live API and retry the issue once.
+      let upserted = this.upsertIssue(issueId, issueData, volumeId);
+      if (!upserted && volumeId) {
+        const volRow = this.conn.prepare("SELECT id FROM cv_volume WHERE id = ?").get(volumeId);
+        if (!volRow) {
+          this.log(`    ⚠ FK failure for issue ${issueId}: volume ${volumeId} missing locally — fetching from live API`);
+          const volData = await this.fetchVolumeDetails(volumeId);
+          if (volData) {
+            this.upsertVolume(volData);
+            upserted = this.upsertIssue(issueId, issueData, volumeId);
+            if (upserted) this.log(`    ✓ Recovered volume ${volumeId} and added issue ${issueId}`);
+          } else {
+            this.log(`    ✗ Could not fetch volume ${volumeId} from live API — skipping issue ${issueId}`);
+          }
+        }
+      }
+      if (!upserted) continue;
 
       if (exists) this.stats.issues_updated++;
       else this.stats.issues_added++;

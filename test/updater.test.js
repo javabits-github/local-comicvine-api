@@ -313,3 +313,86 @@ test("confirmFullSync returns true when --yes is passed without prompting", asyn
 test("confirmFullSync refuses a non-interactive full sync without --yes", async () => {
   assert.equal(await confirmFullSync({ interactive: false, yes: false }), false);
 });
+
+// ─── FK auto-recovery (UPD-4) ───────────────────────────────────────────────
+// A dedicated DB with the production cv_issue→cv_volume FK and
+// PRAGMA foreign_keys=ON (set by connect()) so a missing volume actually
+// triggers FOREIGN KEY constraint failed. The shared test DB above has no
+// FKs, so it cannot exercise the recovery path.
+
+function makeFkDb() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-fk-test-"));
+  const dbPath = path.join(dir, "fk.db");
+  const db = new DatabaseSync(dbPath);
+  // Full cv_volume / cv_issue column sets (so the 13/32-column upserts work),
+  // plus the production cv_issue→cv_volume FK and the SRV-6c join table.
+  db.exec(`
+    CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT);
+    CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER REFERENCES cv_volume(id), name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, object_credits TEXT, concept_credits TEXT, character_died_in TEXT, team_disbanded_in TEXT, first_appearance_characters TEXT, first_appearance_concepts TEXT, first_appearance_locations TEXT, first_appearance_objects TEXT, first_appearance_storyarcs TEXT, first_appearance_teams TEXT, has_staff_review INTEGER);
+    CREATE TABLE cv_volume_issue_ref (volume_id INTEGER NOT NULL, ref_type TEXT NOT NULL, issue_id INTEGER, key_order TEXT, PRIMARY KEY (volume_id, ref_type));
+    CREATE TABLE cv_sync_metadata (endpoint TEXT PRIMARY KEY, last_sync_date TEXT NOT NULL, last_sync_timestamp TEXT NOT NULL, resume_state TEXT);
+    CREATE TABLE sync_errors (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, action TEXT, error TEXT, row_data TEXT, created_at TEXT);
+  `);
+  db.close();
+  return { dir, dbPath };
+}
+
+test("issue FK failure triggers volume backfill, then retry succeeds", async () => {
+  const { dir, dbPath } = makeFkDb();
+  try {
+    // Volume 5000 is intentionally NOT in the DB. The issue references it.
+    const fetchFn = async (url) => {
+      const u = new URL(url);
+      if (u.pathname.match(/\/volume\/4000-5000\//)) {
+        return { status: 200, ok: true, json: async () => ({ status_code: 1, results: { id: 5000, name: "Late Series", publisher: { id: 1 } } }) };
+      }
+      return { status: 200, ok: true, json: async () => ({ status_code: 1, results: [] }) };
+    };
+    const updater = new ComicVineUpdater(dbPath, "test-key", { verbose: false, full: false, fetchFn, apiDelayMs: 0 });
+    assert.ok(updater.connect());
+
+    const issue = { id: 5001, volume: { id: 5000, name: "Late Series" }, name: "Late Series #1", issue_number: "1" };
+
+    // 1) First upsert fails on the FK (volume 5000 missing).
+    assert.equal(updater.upsertIssue(5001, issue, 5000), false);
+    assert.equal(updater.conn.prepare("SELECT id FROM cv_issue WHERE id=5001").get(), undefined);
+
+    // 2) syncIssues recovery: the volume is missing locally, so fetch it.
+    const volData = await updater.fetchVolumeDetails(5000);
+    assert.ok(volData);
+    assert.equal(updater.upsertVolume(volData), true);
+    assert.ok(updater.conn.prepare("SELECT id FROM cv_volume WHERE id=5000").get());
+
+    // 3) Retry the issue upsert — now the volume exists, so it succeeds.
+    assert.equal(updater.upsertIssue(5001, issue, 5000), true);
+    assert.ok(updater.conn.prepare("SELECT id FROM cv_issue WHERE id=5001").get());
+
+    updater.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue FK failure with unfetchable volume is skipped, not fatal", async () => {
+  const { dir, dbPath } = makeFkDb();
+  try {
+    // fetchVolumeDetails returns null (API rate-limited) → recovery gives up,
+    // upsertIssue stays false. 107 with 0 backoff → fast null (no 5s sleeps).
+    const fetchFn = async () => ({ status: 200, ok: true, json: async () => ({ status_code: 107, results: null }) });
+    const updater = new ComicVineUpdater(dbPath, "test-key", { verbose: false, full: false, fetchFn, apiDelayMs: 0, rateLimitBackoffMs: 0, http420BackoffMs: 0 });
+    assert.ok(updater.connect());
+
+    const issue = { id: 5002, volume: { id: 5000 }, name: "Orphan #1", issue_number: "1" };
+    assert.equal(updater.upsertIssue(5002, issue, 5000), false);
+
+    const volData = await updater.fetchVolumeDetails(5000);
+    assert.equal(volData, null);
+    // Volume never added, issue never added — syncIssues would `continue` (skip).
+    assert.equal(updater.conn.prepare("SELECT id FROM cv_volume WHERE id=5000").get(), undefined);
+    assert.equal(updater.conn.prepare("SELECT id FROM cv_issue WHERE id=5002").get(), undefined);
+
+    updater.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

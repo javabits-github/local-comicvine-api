@@ -129,7 +129,13 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
-
+ 
+#### 2026-11-10 — Auto-recover missing volumes during issue sync (UPD-4)
+ 
+- **Context:** the FK diagnostics from UPD-6 surfaced the *root cause* of the issue-sync FK failures: the local `localcv.db` is a synced subset, and an issue's `volume_id` can reference a `cv_volume` row that has no local row (e.g. a volume whose update window the volume sync didn't cover, or a volume that never made the subset). With `PRAGMA foreign_keys=ON`, the issue upsert threw `FOREIGN KEY constraint failed` and the whole issue endpoint aborted.
+- **Change:** [src/updater.js](src/updater.js) now recovers these on the fly instead of aborting. The volume upsert is extracted into `upsertVolume(vol)` (used by `syncVolumes` and the recovery path) and the issue upsert into `upsertIssue(issueId, issueData, volumeId)`. In `syncIssues`, when an issue upsert throws an `FOREIGN KEY` error, the updater checks whether the issue's referenced `volume_id` has a local `cv_volume` row; if it is missing, it queries the live ComicVine API for that specific volume (`volume/4000-${id}/`), upserts it via `upsertVolume`, and retries the issue upsert once. If the volume cannot be fetched (rate-limit exhaustion or a bad reference), the issue is skipped gracefully — no stats increment, no resume-state advance, no metadata advance — rather than aborting the whole issue sync.
+- **Gotcha / follow-up:** the recovery is best-effort per-issue; a volume that is genuinely absent from the live API (or rate-limited) leaves its issue skipped for that run, and `cv_sync_metadata` for issues is not advanced past the failure, so the next run re-attempts from the old safe start date. This closes UPD-4. Verified with two new tests in [test/updater.test.js](test/updater.test.js) against a temp FK-enabled DB: (1) a missing volume is fetched + upserted and the issue retry succeeds; (2) an unfetchable volume is skipped without aborting. Full suite: 60/60 green.
+ 
 #### 2026-11-10 — Diagnose FK failures during issue sync (UPD-6)
 
 - **Context:** an `npm run sync` run was failing mid-issue-sync with `FOREIGN KEY constraint failed` and the endpoint's catch logged only "Skipping metadata update for issues" — no way to tell which FK, row, or SQL was at fault. The local `localcv.db` is a synced subset, so ~905 issues reference `cv_volume` rows that have no local row (`cv_issue.volume_id → cv_volume.id` is the FK that fires).
