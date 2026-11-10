@@ -1735,7 +1735,7 @@ Usage:
 Options:
   --db <path>          Path to a specific database file
   --db-dir <path>      Directory containing dated databases (non-interactive mode)
-  --api-key <key>      ComicVine API key (or COMICVINE_API_KEY env var)
+  --api-key <key>      ComicVine API key (overrides .env COMICVINE_API_KEY)
   --start-date <date>  Custom start date YYYY-MM-DD (default: automatic)
   --full               Full sync: fetch every record (no date filter)
   --yes, -y            Confirm a full sync without an interactive prompt
@@ -1745,7 +1745,7 @@ Options:
   --keep-days <n>      Number of dated databases to keep (default: 7)
 
 Environment:
-  COMICVINE_API_KEY    API key (alternative to --api-key or config file)
+  COMICVINE_API_KEY    API key (from .env or process environment)
 `);
 }
 

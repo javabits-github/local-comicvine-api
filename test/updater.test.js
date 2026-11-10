@@ -337,13 +337,27 @@ function makeFkDb() {
   return { dir, dbPath };
 }
 
+// Remove a per-test temp dir, tolerating EPERM/EBUSY. On Windows a just-closed
+// WAL-mode SQLite DB can still be locked momentarily (WinError 32), so rmSync
+// throws before the OS releases it. Fall back to a deferred async rm at process
+// exit (by which point the lock is gone) so temp dirs don't accumulate.
+function cleanupTempDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    process.once("exit", () => {
+      try { require("node:fs").rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    });
+  }
+}
+
 test("issue FK failure triggers volume backfill, then retry succeeds", async () => {
   const { dir, dbPath } = makeFkDb();
   try {
     // Volume 5000 is intentionally NOT in the DB. The issue references it.
     const fetchFn = async (url) => {
       const u = new URL(url);
-      if (u.pathname.match(/\/volume\/4000-5000\//)) {
+      if (u.pathname.match(/\/volume\/4050-5000\//)) {
         return { status: 200, ok: true, json: async () => ({ status_code: 1, results: { id: 5000, name: "Late Series", publisher: { id: 1 } } }) };
       }
       return { status: 200, ok: true, json: async () => ({ status_code: 1, results: [] }) };
@@ -369,7 +383,7 @@ test("issue FK failure triggers volume backfill, then retry succeeds", async () 
 
     updater.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    cleanupTempDir(dir);
   }
 });
 
@@ -393,6 +407,6 @@ test("issue FK failure with unfetchable volume is skipped, not fatal", async () 
 
     updater.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    cleanupTempDir(dir);
   }
 });
