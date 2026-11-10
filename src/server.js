@@ -27,6 +27,10 @@ const sortableStoryArcFields = new Set([
   "aliases", "count_of_issue_appearances", "date_added", "date_last_updated",
   "deck", "description", "id", "name", "site_detail_url"
 ]);
+const sortableConceptFields = new Set([
+  "aliases", "count_of_issue_appearances", "date_added", "date_last_updated",
+  "deck", "description", "id", "name", "site_detail_url", "start_year"
+]);
 const sortablePublisherFields = new Set([
   "aliases", "date_added", "date_last_updated", "deck", "description", "id", "name",
   "site_detail_url"
@@ -53,7 +57,8 @@ const sortableFieldsByResource = {
   publisher: sortablePublisherFields,
   story_arc: sortableStoryArcFields,
   team: sortableTeamFields,
-  volume: sortableVolumeFields
+  volume: sortableVolumeFields,
+  concept: sortableConceptFields
 };
 
 // SRV-1: the default sort column each list endpoint uses when the client does not
@@ -66,7 +71,8 @@ const defaultSortByResource = {
   publisher: "id",
   story_arc: "id",
   team: "id",
-  volume: "id"
+  volume: "id",
+  concept: "id"
 };
 
 // Per-resource field allowlist and relationship sets live in fieldConfig.js, shared
@@ -312,6 +318,15 @@ function buildResult(row, singular) {
   for (const rel of ["issues", "movies"]) {
    if (has(rel)) result[rel] = parseJsonColumn(row[rel]);
   }
+  return result;
+  }
+  if (singular === "concept") {
+  const result = { id: row.id, name: row.name };
+  for (const field of ["aliases", "api_detail_url", "count_of_issue_appearances", "date_added", "date_last_updated", "deck", "description", "site_detail_url", "start_year"]) {
+   if (has(field)) result[field] = row[field];
+  }
+  if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
+  if (has("first_appeared_in_issue")) result.first_appeared_in_issue = parseJsonColumn(row.first_appeared_in_issue);
   return result;
   }
   return null;

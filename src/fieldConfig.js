@@ -28,6 +28,12 @@ const storyArcFields = new Set([
   "issues", "movies", "name", "publisher", "site_detail_url"
 ]);
 const storyArcRelationshipFields = new Set(["issues", "movies"]);
+const conceptFields = new Set([
+  "aliases", "api_detail_url", "count_of_issue_appearances", "date_added",
+  "date_last_updated", "deck", "description", "first_appeared_in_issue", "id",
+  "image", "name", "site_detail_url", "start_year"
+]);
+const conceptRelationshipFields = new Set();
 const publisherFields = new Set([
   "aliases", "api_detail_url", "characters", "date_added", "date_last_updated", "deck",
   "description", "id", "image", "location_address", "location_city", "location_state",
@@ -67,6 +73,7 @@ const resourceConfig = {
   volume: { fields: volumeFields, relationships: volumeCreditFields },
   team: { fields: teamFields, relationships: teamRelationshipFields },
   story_arc: { fields: storyArcFields, relationships: storyArcRelationshipFields },
+  concept: { fields: conceptFields, relationships: conceptRelationshipFields },
   publisher: { fields: publisherFields, relationships: publisherRelationshipFields },
   person: { fields: personFields, relationships: personRelationshipFields },
   issue: { fields: issueFields, relationships: issueRelationshipFields }
