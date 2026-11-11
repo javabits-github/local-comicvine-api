@@ -64,7 +64,7 @@ test("serves ComicVine-shaped list, filtered, and detail responses", async () =>
   assert.equal(listBody.number_of_total_results, 2);
   assert.equal(listBody.results[0].id, 43);
   assert.equal(listBody.results[0].description, null);
-  assert.equal(Object.hasOwn(listBody.results[0], "image"), false);
+  assert.equal(listBody.results[0].image, null);
 
   const filtered = await fetch(`${baseUrl}/api/issues/?filter=name:Test`);
   const filteredBody = await filtered.json();
@@ -76,7 +76,8 @@ test("serves ComicVine-shaped list, filtered, and detail responses", async () =>
   assert.equal(detail.status, 200);
   assert.equal(detailBody.results.name, "The Test Issue");
   assert.equal(detailBody.results.description, "");
-  assert.equal(Object.hasOwn(detailBody.results, "image"), false);
+  assert.equal(detailBody.results.image.original_url, "https://example.test/issue.jpg");
+  assert.equal(detailBody.results.image.image_tags, "All Images");
 
   const projectedDetail = await fetch(`${baseUrl}/api/issue/4000-42/?field_list=id,name,issue_number`);
   const projectedDetailBody = await projectedDetail.json();
@@ -91,7 +92,7 @@ test("serves ComicVine-shaped list, filtered, and detail responses", async () =>
   const search = await fetch(`${baseUrl}/api/search/?query=Test%20Issue&resources=issue&field_list=id,description,image`);
   const searchBody = await search.json();
   assert.equal(searchBody.results[0].description, "");
-  assert.equal(Object.hasOwn(searchBody.results[0], "image"), false);
+  assert.equal(searchBody.results[0].image.original_url, "https://example.test/issue.jpg");
 
   const nonNameSearch = await fetch(`${baseUrl}/api/search/?query=Moonbeam%20Marker&resources=issue`);
   const nonNameBody = await nonNameSearch.json();
@@ -1331,4 +1332,133 @@ test("applies the configured CORS grant to XML and JSONP responses (SRV-14)", as
       await new Promise((resolve) => srv.close(resolve));
       rmSync(dir, { recursive: true, force: true });
     }
+});
+
+test("emits every stored issue field (SRV-19)", async () => {
+  const srv19Directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-srv19-test-"));
+  const srv19DatabasePath = path.join(srv19Directory, "srv19.db");
+  const srv19Database = new DatabaseSync(srv19DatabasePath);
+  srv19Database.exec(`
+    CREATE TABLE cv_volume (
+      id INTEGER PRIMARY KEY, name TEXT, api_detail_url TEXT, site_detail_url TEXT
+    );
+    CREATE TABLE cv_issue (
+      id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT,
+      cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT,
+      site_detail_url TEXT, character_credits TEXT, person_credits TEXT,
+      team_credits TEXT, location_credits TEXT, story_arc_credits TEXT,
+      associated_images TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT,
+      date_added TEXT, date_last_updated TEXT, object_credits TEXT,
+      concept_credits TEXT, character_died_in TEXT, team_disbanded_in TEXT,
+      first_appearance_characters TEXT, first_appearance_concepts TEXT,
+      first_appearance_locations TEXT, first_appearance_objects TEXT,
+      first_appearance_storyarcs TEXT, first_appearance_teams TEXT,
+      has_staff_review INTEGER
+    );
+  `);
+  srv19Database.prepare("INSERT INTO cv_volume (id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?)")
+    .run(7300, "Strange Adventures", "https://comicvine.gamespot.com/api/volume/4050-7300/", "https://comicvine.gamespot.com/comics/strange-adventures/");
+  const deck = "The Man-Ape thinks he will be the cleverest of all if he manages to read three books!";
+  const imageUrl = "https://comicvine.gamespot.com/a/uploads/original/0/4/2582-1328-2797-1-strange-adventures.jpg";
+  srv19Database.prepare(`
+    INSERT INTO cv_issue (
+      id, volume_id, name, issue_number, cover_date, store_date, description, image_url,
+      site_detail_url, character_credits, person_credits, team_credits, location_credits,
+      story_arc_credits, associated_images, aliases, api_detail_url, deck, date_added,
+      date_last_updated, object_credits, concept_credits, character_died_in,
+      team_disbanded_in, first_appearance_characters, first_appearance_concepts,
+      first_appearance_locations, first_appearance_objects, first_appearance_storyarcs,
+      first_appearance_teams, has_staff_review)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+    .run(2797, 7300, null, "1", "1993-09-01", null, "A full description.", imageUrl,
+      "https://comicvine.gamespot.com/comics/1-strange-adventures/4000-2797/",
+      J([{ id: 1, name: "Hulk" }]), J([{ id: 2, name: "An Artist" }]), J([]), J([]), J([]),
+      J([{ id: 3, original_url: imageUrl, caption: null, image_tags: "All Images" }]),
+      null, "https://comicvine.gamespot.com/api/issue/4000-2797/", deck,
+      "2008-06-06 11:09:57", "2022-07-12 02:21:13", J([]), J([]), J([]), J([]),
+      J([{ id: 4, name: "A Character" }]), J([]), J([]), J([]), J([]), J([]), 0);
+  // A live review object is stored as JSON text by the updater's jsonify.
+  const review = {
+    id: 4457,
+    name: "Aquaman #1 Review",
+    api_detail_url: "https://comicvine.gamespot.com/api/review/1900-4457/",
+    site_detail_url: "https://comicvine.gamespot.com/reviews/aquaman-1/1900-4457/"
+  };
+  srv19Database.prepare("INSERT INTO cv_issue (id, name, has_staff_review) VALUES (?, ?, ?)")
+    .run(537207, "Aquaman #1", J(review));
+  // A row synced before the ALTER migration: the added columns are all NULL.
+  srv19Database.prepare("INSERT INTO cv_issue (id, name, image_url) VALUES (?, ?, ?)")
+    .run(1153517, "A New Issue", null);
+  srv19Database.close();
+
+  const srv19Server = createApiServer(srv19DatabasePath, () => {});
+  await new Promise((resolve) => srv19Server.listen(0, "127.0.0.1", resolve));
+  const srv19Url = `http://127.0.0.1:${srv19Server.address().port}`;
+
+  try {
+    // F2 repro: a field_list for a stored field returns the value, not null.
+    const deckResponse = await fetch(`${srv19Url}/api/issue/4000-2797/?field_list=deck`);
+    const deckBody = await deckResponse.json();
+    assert.equal(deckResponse.status, 200);
+    assert.equal(deckBody.results.deck, deck);
+
+    const detailBody = await (await fetch(`${srv19Url}/api/issue/4000-2797/`)).json();
+    const result = detailBody.results;
+    // Exactly the 31 keys the live API returns for an issue.
+    assert.deepEqual(Object.keys(result).sort(), [
+      "aliases", "api_detail_url", "associated_images", "character_credits",
+      "character_died_in", "concept_credits", "cover_date", "date_added",
+      "date_last_updated", "deck", "description", "first_appearance_characters",
+      "first_appearance_concepts", "first_appearance_locations",
+      "first_appearance_objects", "first_appearance_storyarcs",
+      "first_appearance_teams", "has_staff_review", "id", "image", "issue_number",
+      "location_credits", "name", "object_credits", "person_credits",
+      "site_detail_url", "store_date", "story_arc_credits", "team_credits",
+      "team_disbanded_in", "volume"
+    ]);
+    assert.equal(result.name, null);
+    assert.equal(result.deck, deck);
+    assert.equal(result.has_staff_review, false);
+    assert.deepEqual(result.volume, {
+      id: 7300,
+      name: "Strange Adventures",
+      api_detail_url: "https://comicvine.gamespot.com/api/volume/4050-7300/",
+      site_detail_url: "https://comicvine.gamespot.com/comics/strange-adventures/"
+    });
+    assert.deepEqual(result.character_credits, [{ id: 1, name: "Hulk" }]);
+    assert.deepEqual(result.first_appearance_characters, [{ id: 4, name: "A Character" }]);
+    assert.equal(result.image.original_url, imageUrl);
+    assert.equal(result.image.image_tags, "All Images");
+    assert.equal(result.image.icon_url, imageUrl.replace("/original/", "/square_avatar/"));
+    assert.equal(Object.keys(result.image).length, 10);
+
+    // The JSON-text review ref parses back to the live object shape.
+    const reviewBody = await (await fetch(`${srv19Url}/api/issue/4000-537207/`)).json();
+    assert.deepEqual(reviewBody.results.has_staff_review, review);
+    assert.equal(reviewBody.results.image, null);
+
+    // Pre-ALTER row: the columns exist but are NULL, so the keys are present
+    // with null values (matching the live API for these rows).
+    const newBody = await (await fetch(`${srv19Url}/api/issue/4000-1153517/`)).json();
+    assert.equal(newBody.results.has_staff_review, null);
+    assert.equal(newBody.results.deck, null);
+    assert.equal(newBody.results.image, null);
+    assert.equal(Object.keys(newBody.results).length, 31);
+
+    // The list endpoint emits the same fields per row.
+    const listBody = await (await fetch(`${srv19Url}/api/issues/?field_list=id,deck,has_staff_review,image`)).json();
+    assert.equal(listBody.number_of_total_results, 3);
+    const byId = Object.fromEntries(listBody.results.map((item) => [item.id, item]));
+    assert.equal(byId[2797].deck, deck);
+    assert.equal(byId[2797].has_staff_review, false);
+    assert.equal(byId[2797].image.original_url, imageUrl);
+    assert.deepEqual(byId[537207].has_staff_review, review);
+    assert.equal(byId[537207].image, null);
+    assert.equal(byId[1153517].deck, null);
+    assert.equal(byId[1153517].has_staff_review, null);
+  } finally {
+    await new Promise((resolve) => srv19Server.close(resolve));
+    rmSync(srv19Directory, { recursive: true, force: true });
+  }
 });

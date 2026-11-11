@@ -50,9 +50,10 @@ const personRelationshipFields = new Set([
   "created_characters", "issue_credits", "story_arc_credits", "volume_credits"
 ]);
 
-// image is intentionally absent: normalizeResult strips issue images.
+// SRV-19: image is included — the live API returns it for issues (built from the
+// stored image_url), so it is a valid field_list target.
 const issueFields = new Set([
-  "id", "name", "aliases", "api_detail_url", "deck", "description", "issue_number",
+  "id", "name", "aliases", "api_detail_url", "deck", "description", "image", "issue_number",
   "cover_date", "store_date", "date_added", "date_last_updated", "has_staff_review",
   "site_detail_url", "volume", "character_credits", "person_credits", "team_credits",
   "location_credits", "story_arc_credits", "object_credits", "concept_credits",

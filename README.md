@@ -129,7 +129,13 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
-  
+
+#### 2026-11-10 — Issue responses emit all 31 stored fields (SRV-19)
+
+- **Context:** the structure validation ([docs/structure-validation-2026-11-10.md](docs/structure-validation-2026-11-10.md), F2) found the issue branch of `buildResult` emitted only 14 of the 31 keys the live API returns, so `?field_list=deck` answered `null` for a stored deck (issue 4000-2797) on both detail and list endpoints.
+- **Change:** the issue branch now emits every stored field: `image` (built from the stored `image_url`; `normalizeResult` no longer strips issue images and enriches it with the derived variant URLs, and `image` joins the issue allowlist in [src/fieldConfig.js](src/fieldConfig.js) so `field_list=image` is valid — the live API returns `image` for issues, so emitting it matches live rather than diverging), the five scalars `aliases`/`api_detail_url`/`deck`/`date_added`/`date_last_updated`, `has_staff_review` normalized by a new `parseStaffReview` helper (the one INTEGER column holds three shapes — `0` → `false`, SQL NULL → `null`, JSON text → the parsed review object), and the ten collections via `parseCredits`. Every new field is `has()`-guarded, so databases without the ALTER columns (and the test fixtures) are unchanged. Verified against the live API: issue 2797's key set matches exactly (31 = 31) with no value diffs beyond the known ones, and issue 537207's `has_staff_review` review object is byte-identical to live. New test "emits every stored issue field (SRV-19)" covers the full 31-key shape, all three `has_staff_review` shapes, and the list endpoint; full suite 61/61 green.
+- **Gotcha / follow-up:** two known divergences remain and are tracked separately: the six `first_appearance_*` collections answer `[]` where live answers `null` (the `|| []` storage coercion — UPD-8), and ref objects keep the January-dump key order while the current live API reorders them (report F8). Also found while verifying: validation mode (`COMICVINE_VALIDATE`) can never produce a real diff in production because `fetchLiveEntity` omits the domain prefix from the live URL (`issue/2797/` → `102 Error in URL Format` → `missing_on_live`); tracked as SRV-25.
+
 #### 2026-11-10 — Concept table and sync (DB-2)
 
 - **Context:** the `concept` resource was already declared in the server (`resources`, `fieldConfig`, `buildResult` — commit f1f9ae4), but `localcv.db` had no `cv_concept` table, so the concepts list/detail endpoints 404'd (SRV-3) and the updater never synced concepts.

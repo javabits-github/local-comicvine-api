@@ -116,6 +116,23 @@ function parseJsonColumn(value) {
   return JSON.parse(value);
 }
 
+// SRV-19: has_staff_review is one column holding three shapes — 0 (the live
+// boolean false, coerced by the updater's jsonify), SQL NULL (rows synced before
+// the column existed), and a JSON-text review object. The live API returns
+// boolean false or a review object, so normalize on output.
+function parseStaffReview(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed === 0 || parsed === false ? false : parsed;
+    } catch {
+      return value;
+    }
+  }
+  return value === 0 ? false : Boolean(value);
+}
+
 // SRV-6c: the six volume credit collections, in a fixed order shared with the
 // updater. Bit i of cv_volume.credits_presence marks whether that collection was a
 // non-null array before the JSON columns were replaced by the cv_volume_credit join
@@ -240,7 +257,7 @@ function buildResult(row, singular) {
       api_detail_url: row.volume_api_detail_url ?? `https://comicvine.gamespot.com/api/volume/4050-${row.volume_id}/`,
       site_detail_url: row.volume_site_detail_url ?? null
       };
-  return {
+  const result = {
     id: row.id,
     name: row.name,
     issue_number: row.issue_number,
@@ -256,6 +273,21 @@ function buildResult(row, singular) {
     story_arc_credits: parseCredits(row.story_arc_credits),
     associated_images: parseCredits(row.associated_images)
     };
+  // SRV-19: the live API returns image for issues, so emit it from the stored
+  // image_url (normalizeResult enriches it with the derived variant URLs).
+  if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
+  // The additional stored issue fields, copied when the column is present so a
+  // field_list request returns the value instead of the null default.
+  for (const field of ["aliases", "api_detail_url", "deck", "date_added", "date_last_updated"]) {
+    if (has(field)) result[field] = row[field];
+  }
+  if (has("has_staff_review")) result.has_staff_review = parseStaffReview(row.has_staff_review);
+  for (const field of ["object_credits", "concept_credits", "character_died_in", "team_disbanded_in",
+    "first_appearance_characters", "first_appearance_concepts", "first_appearance_locations",
+    "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"]) {
+    if (has(field)) result[field] = parseCredits(row[field]);
+  }
+  return result;
   }
   if (singular === "publisher") {
   const result = {
@@ -671,12 +703,11 @@ function parseSearchResources(resourceList, resourceByPath) {
 
 function normalizeResult(result, resourceType) {
   let normalized = result;
-  if (resourceType === "issue") {
-    if (!Object.hasOwn(result, "description") || Object.hasOwn(result, "image")) {
-      normalized = { ...result };
-      if (!Object.hasOwn(normalized, "description")) normalized.description = null;
-      delete normalized.image;
-    }
+  // SRV-19: issues keep their image (the live API returns one); only default a
+  // missing description to null for fixtures predating the column.
+  if (resourceType === "issue" && !Object.hasOwn(result, "description")) {
+    normalized = { ...result };
+    normalized.description = null;
   }
   if (!normalized.image || typeof normalized.image !== "object" || !normalized.image.original_url) return normalized;
 
