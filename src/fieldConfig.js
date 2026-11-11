@@ -38,16 +38,19 @@ const volumeCreditFields = new Set([
   "character_credits", "concept_credits", "location_credits", "object_credits",
   "person_credits", "team_credits"
 ]);
+// SRV-22: the live API emits the team's appearance count and disbanded collection
+// under its typo names; the allowlist uses the live names so field_list matches
+// the live API (same as person, SRV-20).
 const teamFields = new Set([
-  "aliases", "api_detail_url", "count_of_issue_appearances", "count_of_team_members",
+  "aliases", "api_detail_url", "count_of_isssue_appearances", "count_of_team_members",
   "character_enemies", "character_friends", "characters", "date_added", "date_last_updated",
   "deck", "description", "disbanded_in_issues", "first_appeared_in_issue", "id", "image",
-  "issue_credits", "issues_disbanded_in", "movies", "name", "publisher", "site_detail_url",
+  "issue_credits", "isssues_disbanded_in", "movies", "name", "publisher", "site_detail_url",
   "story_arc_credits", "volume_credits"
 ]);
 const teamRelationshipFields = new Set([
   "character_enemies", "character_friends", "characters", "disbanded_in_issues",
-  "issue_credits", "issues_disbanded_in", "movies", "story_arc_credits", "volume_credits"
+  "issue_credits", "isssues_disbanded_in", "movies", "story_arc_credits", "volume_credits"
 ]);
 const storyArcFields = new Set([
   "aliases", "api_detail_url", "count_of_issue_appearances", "date_added",

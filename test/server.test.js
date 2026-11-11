@@ -16,7 +16,7 @@ const J = (value) => JSON.stringify(value);
 database.exec("CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, image_url TEXT, site_detail_url TEXT, aliases TEXT, date_added TEXT, location_address TEXT, location_city TEXT, location_state TEXT, characters TEXT, story_arcs TEXT, teams TEXT, volumes TEXT)");
 database.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, team_credits TEXT, date_added TEXT, date_last_updated TEXT, deck TEXT)");
 database.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT)");
-database.exec("CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, count_of_team_members INTEGER, date_added TEXT, date_last_updated TEXT, first_appeared_in_issue TEXT, publisher TEXT, site_detail_url TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT)");
+database.exec("CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_team_members INTEGER, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT)");
 database.exec("CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, count_of_issue_appearances INTEGER, date_added TEXT, first_appeared_in_issue TEXT, publisher TEXT, site_detail_url TEXT, issues TEXT, movies TEXT)");
 database.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT, birth TEXT, count_of_issue_appearances INTEGER, country TEXT, date_added TEXT, date_last_updated TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, image_url TEXT, created_characters TEXT, issue_credits TEXT, story_arc_credits TEXT, volume_credits TEXT, site_detail_url TEXT)");
 database.prepare("INSERT INTO cv_publisher (id, name, site_detail_url, aliases, date_added, location_address, location_city, location_state, characters, story_arcs, teams, volumes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -31,8 +31,8 @@ database.prepare("INSERT INTO cv_issue (id, volume_id, name, issue_number, descr
     .run(42, null, "The Test Issue", "1", "", "https://example.test/issue.jpg");
 database.prepare("INSERT INTO cv_issue (id, name) VALUES (?, ?)")
     .run(43, "Another Issue");
-database.prepare("INSERT INTO cv_team (id, name, count_of_team_members, date_added, first_appeared_in_issue, publisher, site_detail_url, character_enemies, character_friends, characters, disbanded_in_issues, issue_credits, issues_disbanded_in, movies, story_arc_credits, volume_credits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .    run(1800, "The Hand", 93, "2020-04-15 10:00:00", J({ id: 20965, name: "Elektra", issue_number: "168" }), J({ id: 31, name: "Marvel" }), "https://example.test/the-hand/", J([]), J([]), J([]), J([]), J([]), J([]), J([]), J([]), J([]));
+database.prepare("INSERT INTO cv_team (id, name, publisher, aliases, count_of_team_members, count_of_issue_appearances, deck, description, date_added, date_last_updated, image_url, site_detail_url, first_appeared_in_issue, character_enemies, character_friends, characters, disbanded_in_issues, issue_credits, issues_disbanded_in, movies, story_arc_credits, volume_credits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .    run(1800, "The Hand", J({ id: 31, name: "Marvel" }), "The Hand (Marvel)", 93, 180, "A secret organization of assassins", "The Hand is a secret organization of assassins that operates in the shadows.", "2020-04-15 10:00:00", "2021-05-01 08:30:00", "https://example.test/the-hand.jpg", "https://example.test/the-hand/", J({ id: 20965, name: "Elektra", issue_number: "168" }), J([]), J([]), J([]), J([]), J([]), J([]), J([]), J([]), J([]));
 database.prepare("INSERT INTO cv_team (id, name, date_added) VALUES (?, ?, ?)")
     .run(1801, "Avengers", "1899-01-01 00:00:00");
 database.prepare("INSERT INTO cv_storyarc (id, name, aliases, count_of_issue_appearances, date_added, first_appeared_in_issue, publisher, site_detail_url, issues, movies) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -300,7 +300,7 @@ test("serves singular volume details with field_list and requested credit fields
 });
 
 test("supports team fields, sort, pagination, and filters", async () => {
-  const response = await fetch(`${baseUrl}/api/teams?format=json&sort=name:desc&limit=1&field_list=id,name,count_of_team_members,publisher,first_appeared_in_issue`);
+  const response = await fetch(`${baseUrl}/api/teams?format=json&sort=name:desc&limit=1&field_list=id,name,count_of_team_members,count_of_isssue_appearances,publisher,first_appeared_in_issue`);
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -309,9 +309,15 @@ test("supports team fields, sort, pagination, and filters", async () => {
     id: 1800,
     name: "The Hand",
     count_of_team_members: 93,
+    count_of_isssue_appearances: 180,
     publisher: { id: 31, name: "Marvel" },
     first_appeared_in_issue: { id: 20965, name: "Elektra", issue_number: "168" }
   }]);
+
+  // SRV-22: the live API's typo count name sorts on the corrected-spelling column.
+  const sorted = await fetch(`${baseUrl}/api/teams?format=json&sort=count_of_isssue_appearances:desc&limit=1&field_list=id,name`);
+  const sortedBody = await sorted.json();
+  assert.deepEqual(sortedBody.results, [{ id: 1800, name: "The Hand" }]);
 
   const filtered = await fetch(`${baseUrl}/api/teams?filter=date_added:2020-01-01%7C2021-01-01&field_list=id,name`);
   const filteredBody = await filtered.json();
@@ -331,7 +337,7 @@ test("supports team XML and JSONP formats", async () => {
 });
 
 test("serves singular team details with requested relationship fields", async () => {
-  const fields = "id,name,character_enemies,character_friends,characters,disbanded_in_issues,first_appeared_in_issue,issue_credits,issues_disbanded_in,movies,story_arc_credits,volume_credits";
+  const fields = "id,name,character_enemies,character_friends,characters,disbanded_in_issues,first_appeared_in_issue,issue_credits,isssues_disbanded_in,movies,story_arc_credits,volume_credits";
   const response = await fetch(`${baseUrl}/api/team/4060-1800/?format=json&field_list=${fields}`);
   const body = await response.json();
 
@@ -345,7 +351,7 @@ test("serves singular team details with requested relationship fields", async ()
     disbanded_in_issues: [],
     first_appeared_in_issue: { id: 20965, name: "Elektra", issue_number: "168" },
     issue_credits: [],
-    issues_disbanded_in: [],
+    isssues_disbanded_in: [],
     movies: [],
     story_arc_credits: [],
     volume_credits: []
@@ -358,6 +364,42 @@ test("serves singular team details with requested relationship fields", async ()
     id: 1800,
     name: "The Hand"
   });
+});
+
+test("emits the full team shape with live names and types (SRV-22)", async () => {
+  const response = await fetch(`${baseUrl}/api/team/4060-1800/?format=json`);
+  const body = await response.json();
+  const team = body.results;
+
+  assert.equal(response.status, 200);
+  // The api_detail_url is derived from the id; the table has no such column.
+  assert.equal(team.api_detail_url, "https://comicvine.gamespot.com/api/team/4060-1800/");
+  // The internal image_url column no longer leaks; image is built from it.
+  assert.equal(Object.hasOwn(team, "image_url"), false);
+  assert.equal(team.image.original_url, "https://example.test/the-hand.jpg");
+  // The count and disbanded collection use the live API's typo names; the
+  // corrected spellings are not emitted.
+  assert.equal(team.count_of_isssue_appearances, 180);
+  assert.equal(Object.hasOwn(team, "count_of_issue_appearances"), false);
+  assert.deepEqual(team.isssues_disbanded_in, []);
+  assert.equal(Object.hasOwn(team, "issues_disbanded_in"), false);
+  // The remaining stored fields are emitted with their live names.
+  assert.equal(team.aliases, "The Hand (Marvel)");
+  assert.equal(team.deck, "A secret organization of assassins");
+  assert.equal(team.description, "The Hand is a secret organization of assassins that operates in the shadows.");
+  assert.equal(team.date_added, "2020-04-15 10:00:00");
+  assert.equal(team.date_last_updated, "2021-05-01 08:30:00");
+  assert.equal(team.site_detail_url, "https://example.test/the-hand/");
+  assert.deepEqual(team.publisher, { id: 31, name: "Marvel" });
+  assert.deepEqual(team.first_appeared_in_issue, { id: 20965, name: "Elektra", issue_number: "168" });
+  assert.deepEqual(team.character_enemies, []);
+  assert.deepEqual(team.character_friends, []);
+  assert.deepEqual(team.characters, []);
+  assert.deepEqual(team.disbanded_in_issues, []);
+  assert.deepEqual(team.issue_credits, []);
+  assert.deepEqual(team.movies, []);
+  assert.deepEqual(team.story_arc_credits, []);
+  assert.deepEqual(team.volume_credits, []);
 });
 
 test("supports story arc fields, sorting, pagination, and filters", async () => {

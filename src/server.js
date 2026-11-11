@@ -20,7 +20,7 @@ const resources = {
   volume: { table: "cv_volume", plural: "volumes" }
 };
 const sortableTeamFields = new Set([
-  "aliases", "count_of_issue_appearances", "count_of_team_members", "date_added",
+  "aliases", "count_of_issue_appearances", "count_of_isssue_appearances", "count_of_team_members", "date_added",
   "date_last_updated", "deck", "description", "id", "name", "site_detail_url"
 ]);
 const sortableStoryArcFields = new Set([
@@ -345,14 +345,24 @@ function buildResult(row, singular) {
    name: row.name,
    publisher
     };
-  for (const field of ["aliases", "count_of_issue_appearances", "count_of_team_members", "deck", "description", "date_added", "date_last_updated", "image_url", "site_detail_url"]) {
+  // SRV-22: the live API always emits api_detail_url; derive it from the id
+  // (the table has no such column; same approach as publisher, SRV-21).
+  result.api_detail_url = buildApiDetailUrl("team", row.id);
+  for (const field of ["aliases", "count_of_team_members", "deck", "description", "date_added", "date_last_updated", "site_detail_url"]) {
   if (has(field)) result[field] = row[field];
   }
+  // SRV-22: the live API emits the appearance count under its typo name; the
+  // stored column keeps the corrected spelling (same as person, SRV-20).
+  if (has("count_of_issue_appearances")) result.count_of_isssue_appearances = row.count_of_issue_appearances;
+  // SRV-22: image is built from the stored image_url; the internal column is not emitted.
   if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
   if (has("first_appeared_in_issue")) result.first_appeared_in_issue = parseJsonColumn(row.first_appeared_in_issue);
-  for (const rel of ["character_enemies", "character_friends", "characters", "disbanded_in_issues", "issue_credits", "issues_disbanded_in", "movies", "story_arc_credits", "volume_credits"]) {
+  for (const rel of ["character_enemies", "character_friends", "characters", "disbanded_in_issues", "issue_credits", "movies", "story_arc_credits", "volume_credits"]) {
   if (has(rel)) result[rel] = parseJsonColumn(row[rel]);
   }
+  // SRV-22: the live API emits the disbanded collection under its typo name; the
+  // stored column keeps the corrected spelling (same as person, SRV-20).
+  if (has("issues_disbanded_in")) result.isssues_disbanded_in = parseJsonColumn(row.issues_disbanded_in);
   return result;
   }
   if (singular === "story_arc") {
@@ -392,8 +402,8 @@ function columnExpression(config, field) {
   if (config.singular === "issue" && (lower === "volume" || lower === "volume_id")) {
    return { kind: "volume" };
    }
-  // SRV-20: the live API's typo count name maps to the corrected-spelling column.
-  if (config.singular === "person" && lower === "count_of_isssue_appearances") {
+  // SRV-20/SRV-22: the live API's typo count name maps to the corrected-spelling column.
+  if ((config.singular === "person" || config.singular === "team") && lower === "count_of_isssue_appearances") {
    return { kind: "column", expression: `${config.alias}.count_of_issue_appearances` };
    }
   if (config.columns.has(lower)) {
