@@ -7,6 +7,7 @@ const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
 const { createApiServer, parseBoolFlag } = require("../src/server");
 const { buildLiveUrl, DOMAIN_PREFIXES } = require("../src/validate");
+const { buildApiDetailUrl } = require("../src/fieldConfig");
 
 const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-api-test-"));
 const databasePath = path.join(directory, "test.db");
@@ -462,6 +463,25 @@ test("serves publisher details with relationship fields and format selection", a
   assert.deepEqual(JSON.parse(jsonpBody.slice("ComicVine.publisher(".length, -2)).results, {
     id: 4,
     name: "Dell"
+  });
+});
+
+test("derives publisher api_detail_url from the id (SRV-21)", async () => {
+  const response = await fetch(`${baseUrl}/api/publisher/4010-4/?format=json`);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  // The live API always emits api_detail_url; the mock derives it from the id
+  // (canonical base URL + domain prefix + id) instead of reading a stored column.
+  assert.equal(body.results.api_detail_url, "https://comicvine.gamespot.com/api/publisher/4010-4/");
+  // id stays the first key so the XML shape matches the live API.
+  assert.equal(Object.keys(body.results)[0], "id");
+
+  const projected = await fetch(`${baseUrl}/api/publisher/4010-4/?format=json&field_list=id,name,api_detail_url`);
+  const projectedBody = await projected.json();
+  assert.deepEqual(projectedBody.results, {
+    id: 4,
+    name: "Dell",
+    api_detail_url: "https://comicvine.gamespot.com/api/publisher/4010-4/"
   });
 });
 
@@ -1143,6 +1163,17 @@ test("buildLiveUrl applies the ComicVine domain prefix (SRV-25)", () => {
   for (const [singular, prefix] of Object.entries(DOMAIN_PREFIXES)) {
     assert.equal(buildLiveUrl(singular, 1), `https://comicvine.gamespot.com/api/${singular}/${prefix}-1/`);
   }
+});
+
+test("buildApiDetailUrl derives the canonical api_detail_url (SRV-21)", () => {
+  // The live API's api_detail_url is exactly the URL the validator fetches:
+  // base URL + resource type + domain-prefixed id.
+  assert.equal(buildApiDetailUrl("publisher", 4), "https://comicvine.gamespot.com/api/publisher/4010-4/");
+  assert.equal(buildApiDetailUrl("issue", 2797), "https://comicvine.gamespot.com/api/issue/4000-2797/");
+  assert.equal(buildApiDetailUrl("volume", 7300), "https://comicvine.gamespot.com/api/volume/4050-7300/");
+  assert.equal(buildApiDetailUrl("person", 1251), "https://comicvine.gamespot.com/api/person/4040-1251/");
+  // A resource with no verified domain prefix cannot be derived.
+  assert.equal(buildApiDetailUrl("character", 17), null);
 });
 
 test("parseBoolFlag treats 0/false/no/off as off and 1/true/yes/on as on (SRV-25)", () => {

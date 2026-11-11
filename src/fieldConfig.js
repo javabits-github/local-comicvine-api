@@ -1,6 +1,33 @@
 // Per-resource field allowlists and relationship (collection) sets, shared by the
 // server (field_list projection) and the live-API validator (field classification).
 
+// SRV-25: ComicVine domain prefixes. The live API requires the domain-prefixed id
+// form (e.g. issue/4000-2797/); a bare numeric id (issue/2797/) answers 102
+// "Error in URL Format", which fetchLiveEntity maps to null -> "missing_on_live",
+// so validation could never produce a real diff in production. Every value here
+// was verified against the live API on 2026-11-10 (publisher is 4010, not the
+// 4030 first guessed in the TODO).
+const API_BASE_URL = "https://comicvine.gamespot.com/api/";
+const DOMAIN_PREFIXES = {
+  issue: "4000",
+  volume: "4050",
+  person: "4040",
+  team: "4060",
+  story_arc: "4045",
+  publisher: "4010",
+  concept: "4015"
+};
+
+// SRV-21: the canonical api_detail_url for an entity: base URL + resource type +
+// domain-prefixed id. The live API always emits it for these resources, and the
+// stored column (where one exists) matches it for every row, so it can be derived
+// from the id alone. Returns null when the resource has no known domain prefix.
+function buildApiDetailUrl(singular, id) {
+  const prefix = DOMAIN_PREFIXES[singular];
+  if (!prefix) return null;
+  return `${API_BASE_URL}${singular}/${prefix}-${id}/`;
+}
+
 const volumeFields = new Set([
   "aliases", "api_detail_url", "count_of_issues", "date_added", "date_last_updated",
   "character_credits", "concept_credits", "deck", "description", "first_issue", "id",
@@ -83,4 +110,4 @@ const resourceConfig = {
   issue: { fields: issueFields, relationships: issueRelationshipFields }
 };
 
-module.exports = { resourceConfig };
+module.exports = { resourceConfig, API_BASE_URL, DOMAIN_PREFIXES, buildApiDetailUrl };

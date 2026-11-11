@@ -2,7 +2,7 @@ const { createServer } = require("node:http");
 const { DatabaseSync } = require("node:sqlite");
 const path = require("node:path");
 const fs = require("node:fs");
-const { resourceConfig } = require("./fieldConfig.js");
+const { resourceConfig, buildApiDetailUrl } = require("./fieldConfig.js");
 const { validateEntity } = require("./validate.js");
 
 // Map API resource names to their database table and collection path.
@@ -263,7 +263,7 @@ function buildResult(row, singular) {
       : {
       id: row.volume_id,
       name: row.volume_name ?? null,
-      api_detail_url: row.volume_api_detail_url ?? `https://comicvine.gamespot.com/api/volume/4050-${row.volume_id}/`,
+      api_detail_url: row.volume_api_detail_url ?? buildApiDetailUrl("volume", row.volume_id),
       site_detail_url: row.volume_site_detail_url ?? null
       };
   const result = {
@@ -305,6 +305,9 @@ function buildResult(row, singular) {
     image: row.image_url ? { original_url: row.image_url } : null,
     site_detail_url: row.site_detail_url
     };
+  // SRV-21: the live API always emits api_detail_url; derive it from the id
+  // (canonical base URL + domain prefix + id) instead of reading a stored column.
+  result.api_detail_url = buildApiDetailUrl("publisher", row.id);
   for (const field of ["aliases", "deck", "description", "date_added", "date_last_updated"]) {
    if (has(field)) result[field] = row[field];
   }

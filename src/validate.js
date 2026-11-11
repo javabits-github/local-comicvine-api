@@ -1,4 +1,7 @@
-const { resourceConfig } = require("./fieldConfig.js");
+// API_BASE_URL and DOMAIN_PREFIXES live in fieldConfig.js (shared with the
+// server, which derives api_detail_url from them — SRV-21) and are re-exported
+// below for existing importers.
+const { resourceConfig, API_BASE_URL, DOMAIN_PREFIXES } = require("./fieldConfig.js");
 
 // Live ComicVine API client + local-vs-live result diffing for SRV-8.
 //
@@ -6,7 +9,6 @@ const { resourceConfig } = require("./fieldConfig.js");
 // 100 = invalid key, 107 = rate limit exceeded. Mirrors the updater's api_call
 // contract (escalating backoff on 107, abort on 100, null on exhaustion).
 
-const API_BASE_URL = "https://comicvine.gamespot.com/api/";
 const HEADERS = {
   "User-Agent": "LocalCVValidator/1.0",
   From: "comicvine-user@example.com"
@@ -14,22 +16,6 @@ const HEADERS = {
 const MAX_RETRIES = 5;
 const RATE_LIMIT_BACKOFF_SECONDS = 60;
 const API_DELAY_SECONDS = 1.5;
-
-// SRV-25: ComicVine domain prefixes. The live API requires the domain-prefixed id
-// form (e.g. issue/4000-2797/); a bare numeric id (issue/2797/) answers 102
-// "Error in URL Format", which fetchLiveEntity maps to null -> "missing_on_live",
-// so validation could never produce a real diff in production. Every value here
-// was verified against the live API on 2026-11-10 (publisher is 4010, not the
-// 4030 first guessed in the TODO).
-const DOMAIN_PREFIXES = {
-  issue: "4000",
-  volume: "4050",
-  person: "4040",
-  team: "4060",
-  story_arc: "4045",
-  publisher: "4010",
-  concept: "4015"
-};
 
 // Fields that legitimately differ between a live entity and the bundled snapshot
 // (the mock never refreshes these), or are absent from the bundled data.
