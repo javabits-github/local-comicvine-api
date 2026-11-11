@@ -790,6 +790,17 @@ function parseKeyList(value) {
   return keys;
 }
 
+// SRV-25: parse a boolean environment flag. The opt-in flags (validation, the
+// response/SQL loggers) are enabled only by an explicit on-spelling
+// (1/true/yes/on, case-insensitive); 0/false/no/off and unset are all off. A
+// plain truthiness test would wrongly enable a flag set to "0" — a non-empty
+// string is truthy in JS — so COMICVINE_VALIDATE=0 (the README's "off" spelling)
+// actually turned validation *on*.
+function parseBoolFlag(value) {
+  if (value === undefined || value === null) return false;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
 // SRV-13: pull the caller's API key from the most likely carrier, in priority
 // order: the `X-Api-Key` (or `X_API_KEY`) header, a `Bearer` Authorization
 // header, then the `api_key`/`key` query parameter. Returns the raw string or
@@ -1371,18 +1382,20 @@ if (require.main === module) {
     // COMICVINE_FORCED_LIMIT overrides the client's ?limit on the search endpoint only.
   if (process.env.COMICVINE_FORCED_LIMIT) options.searchForcedLimit = process.env.COMICVINE_FORCED_LIMIT;
     // COMICVINE_VALIDATE=1 enables SRV-8 live-API validation on detail endpoints;
-    // the live key is read from COMICVINE_API_KEY.
-  if (process.env.COMICVINE_VALIDATE) options.validate = true;
+    // the live key is read from COMICVINE_API_KEY. Only an explicit on-spelling
+    // enables it, so COMICVINE_VALIDATE=0 (the README's "off" spelling) disables
+    // it — a truthiness test would treat the string "0" as enabled (SRV-25).
+  if (parseBoolFlag(process.env.COMICVINE_VALIDATE)) options.validate = true;
     // SRV-13: COMICVINE_API_KEYS enables incoming-request key authentication for
     // resource endpoints. When unset the server stays open (local default).
   if (process.env.COMICVINE_API_KEYS) options.apiKeys = process.env.COMICVINE_API_KEYS;
     // SRV-16: COMICVINE_LOG_RESPONSES logs each request's serialized response body
     // (truncated to COMICVINE_LOG_RESPONSE_MAX_LENGTH). Off by default.
-    if (process.env.COMICVINE_LOG_RESPONSES) options.logResponses = true;
+    if (parseBoolFlag(process.env.COMICVINE_LOG_RESPONSES)) options.logResponses = true;
     if (process.env.COMICVINE_LOG_RESPONSE_MAX_LENGTH) options.logResponseMaxLength = process.env.COMICVINE_LOG_RESPONSE_MAX_LENGTH;
     // SRV-17: COMICVINE_LOG_SQL logs the SQL executed to build each response
     // (truncated to COMICVINE_LOG_SQL_MAX_LENGTH). Off by default.
-    if (process.env.COMICVINE_LOG_SQL) options.logSql = true;
+    if (parseBoolFlag(process.env.COMICVINE_LOG_SQL)) options.logSql = true;
     if (process.env.COMICVINE_LOG_SQL_MAX_LENGTH) options.logSqlMaxLength = process.env.COMICVINE_LOG_SQL_MAX_LENGTH;
     const server = createApiServer(databasePath, undefined, options);
   server.listen(port, host, () => {
@@ -1390,4 +1403,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApiServer, resourceConfig };
+module.exports = { createApiServer, resourceConfig, parseBoolFlag };

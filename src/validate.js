@@ -15,6 +15,22 @@ const MAX_RETRIES = 5;
 const RATE_LIMIT_BACKOFF_SECONDS = 60;
 const API_DELAY_SECONDS = 1.5;
 
+// SRV-25: ComicVine domain prefixes. The live API requires the domain-prefixed id
+// form (e.g. issue/4000-2797/); a bare numeric id (issue/2797/) answers 102
+// "Error in URL Format", which fetchLiveEntity maps to null -> "missing_on_live",
+// so validation could never produce a real diff in production. Every value here
+// was verified against the live API on 2026-11-10 (publisher is 4010, not the
+// 4030 first guessed in the TODO).
+const DOMAIN_PREFIXES = {
+  issue: "4000",
+  volume: "4050",
+  person: "4040",
+  team: "4060",
+  story_arc: "4045",
+  publisher: "4010",
+  concept: "4015"
+};
+
 // Fields that legitimately differ between a live entity and the bundled snapshot
 // (the mock never refreshes these), or are absent from the bundled data.
 const IGNORED_FIELDS = new Set([
@@ -116,10 +132,19 @@ function diffCollections(singular, live, local) {
   return diffs;
 }
 
+// Build the live-API detail URL for one entity. `id` is the bare numeric id; the
+// resource's domain prefix is prepended (issue/4000-2797/). An unknown resource
+// type falls back to the bare id, preserving the previous (102-answering) behavior.
+function buildLiveUrl(singular, id) {
+  const prefix = DOMAIN_PREFIXES[singular];
+  const idPath = prefix ? `${prefix}-${id}` : String(id);
+  return `${API_BASE_URL}${singular}/${idPath}/`;
+}
+
 // Fetch a single entity from the live API. Returns the result object, or null if
 // the entity is absent (status_code 101) or the call cannot be completed.
 async function fetchLiveEntity(singular, id, apiKey) {
-  const url = `${API_BASE_URL}${singular}/${id}/?api_key=${encodeURIComponent(apiKey)}&format=json&limit=1`;
+  const url = `${buildLiveUrl(singular, id)}?api_key=${encodeURIComponent(apiKey)}&format=json&limit=1`;
   await new Promise((resolve) => setTimeout(resolve, API_DELAY_SECONDS * 1000));
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -174,6 +199,8 @@ async function validateEntity(singular, id, localResult, apiKey, compareCollecti
 module.exports = {
   validateEntity,
   fetchLiveEntity,
+  buildLiveUrl,
+  DOMAIN_PREFIXES,
   diffEntity,
   diffCollections,
   API_BASE_URL,

@@ -5,7 +5,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
-const { createApiServer } = require("../src/server");
+const { createApiServer, parseBoolFlag } = require("../src/server");
+const { buildLiveUrl, DOMAIN_PREFIXES } = require("../src/validate");
 
 const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-api-test-"));
 const databasePath = path.join(directory, "test.db");
@@ -1101,6 +1102,40 @@ test("reports a match when the live entity matches the local one", async () => {
   } finally {
     await new Promise((resolve) => validateServer.close(resolve));
   }
+});
+
+test("buildLiveUrl applies the ComicVine domain prefix (SRV-25)", () => {
+  // The live API requires the domain-prefixed id form; a bare numeric id answers
+  // 102 "Error in URL Format". The existing validation tests inject a fake
+  // fetchFn and so never exercise this URL construction, which is why the bug
+  // shipped. Assert the prefix directly for the known resource types.
+  assert.equal(buildLiveUrl("issue", 2797), "https://comicvine.gamespot.com/api/issue/4000-2797/");
+  assert.equal(buildLiveUrl("volume", 7300), "https://comicvine.gamespot.com/api/volume/4050-7300/");
+  assert.equal(buildLiveUrl("publisher", 4), "https://comicvine.gamespot.com/api/publisher/4010-4/");
+  assert.equal(buildLiveUrl("person", 1251), "https://comicvine.gamespot.com/api/person/4040-1251/");
+  // Every resource in the prefix map yields a domain-prefixed path.
+  for (const [singular, prefix] of Object.entries(DOMAIN_PREFIXES)) {
+    assert.equal(buildLiveUrl(singular, 1), `https://comicvine.gamespot.com/api/${singular}/${prefix}-1/`);
+  }
+});
+
+test("parseBoolFlag treats 0/false/no/off as off and 1/true/yes/on as on (SRV-25)", () => {
+  // The SRV-25 gotcha: a plain truthiness test treats the string "0" as enabled,
+  // so COMICVINE_VALIDATE=0 (the README's "off" spelling) actually turned
+  // validation on. Only an explicit on-spelling enables an opt-in flag.
+  assert.equal(parseBoolFlag("0"), false);
+  assert.equal(parseBoolFlag("false"), false);
+  assert.equal(parseBoolFlag("no"), false);
+  assert.equal(parseBoolFlag("off"), false);
+  assert.equal(parseBoolFlag(""), false);
+  assert.equal(parseBoolFlag(undefined), false);
+  assert.equal(parseBoolFlag("1"), true);
+  assert.equal(parseBoolFlag("true"), true);
+  assert.equal(parseBoolFlag("yes"), true);
+  assert.equal(parseBoolFlag("on"), true);
+  // Case- and whitespace-insensitive.
+  assert.equal(parseBoolFlag("TRUE"), true);
+  assert.equal(parseBoolFlag(" Off "), false);
 });
 
 test("excludes blocked publishers from volume search and list (SRV-12)", async () => {
