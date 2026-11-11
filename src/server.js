@@ -36,8 +36,8 @@ const sortablePublisherFields = new Set([
   "site_detail_url"
 ]);
 const sortablePersonFields = new Set([
-  "aliases", "birth", "count_of_issue_appearances", "country", "date_added",
-  "date_last_updated", "death", "deck", "description", "gender", "hometown", "id", "name"
+  "aliases", "birth", "count_of_issue_appearances", "count_of_isssue_appearances", "country",
+  "date_added", "date_last_updated", "death", "deck", "description", "gender", "hometown", "id", "name"
 ]);
 const sortableVolumeFields = new Set([
   "aliases", "count_of_issues", "date_added", "date_last_updated", "deck",
@@ -131,6 +131,15 @@ function parseStaffReview(value) {
     }
   }
   return value === 0 ? false : Boolean(value);
+}
+
+// SRV-20: cv_person.gender is TEXT and preserves float spellings ("0.0", "1.0");
+// the live API emits a number, so coerce on output. NULL becomes null and a
+// non-numeric value passes through so a stray value never breaks a response.
+function parseGender(value) {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : value;
 }
 
 // SRV-6c: the six volume credit collections, in a fixed order shared with the
@@ -309,13 +318,21 @@ function buildResult(row, singular) {
   }
   if (singular === "person") {
   const result = { id: row.id, name: row.name };
-  for (const field of ["aliases", "birth", "count_of_issue_appearances", "country", "deck", "description", "email", "gender", "hometown", "image_url", "site_detail_url", "website"]) {
+  for (const field of ["aliases", "api_detail_url", "birth", "country", "deck", "description", "date_added", "date_last_updated", "death", "email", "hometown", "site_detail_url", "website"]) {
    if (has(field)) result[field] = row[field];
   }
+  // SRV-20: the live API emits the issue-credit count under its typo name; the
+  // stored column keeps the corrected spelling (count_of_issue_appearances).
+  if (has("count_of_issue_appearances")) result.count_of_isssue_appearances = row.count_of_issue_appearances;
+  // SRV-20: gender is stored as TEXT (including float spellings); the live API emits a number.
+  if (has("gender")) result.gender = parseGender(row.gender);
+  // SRV-20: image is built from the stored image_url; the internal column is not emitted.
   if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
-  for (const rel of ["created_characters", "issue_credits", "story_arc_credits", "volume_credits"]) {
+  for (const rel of ["created_characters", "story_arc_credits", "volume_credits"]) {
    if (has(rel)) result[rel] = parseJsonColumn(row[rel]);
   }
+  // SRV-20: the live API emits the person's issue credits under `issues`.
+  if (has("issue_credits")) result.issues = parseJsonColumn(row.issue_credits);
   return result;
   }
   if (singular === "team") {
@@ -371,6 +388,10 @@ function columnExpression(config, field) {
   const lower = field.toLowerCase();
   if (config.singular === "issue" && (lower === "volume" || lower === "volume_id")) {
    return { kind: "volume" };
+   }
+  // SRV-20: the live API's typo count name maps to the corrected-spelling column.
+  if (config.singular === "person" && lower === "count_of_isssue_appearances") {
+   return { kind: "column", expression: `${config.alias}.count_of_issue_appearances` };
    }
   if (config.columns.has(lower)) {
    return { kind: "column", expression: `${config.alias}.${lower}` };

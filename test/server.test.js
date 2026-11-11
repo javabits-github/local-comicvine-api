@@ -17,7 +17,7 @@ database.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliase
 database.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT)");
 database.exec("CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, count_of_team_members INTEGER, date_added TEXT, date_last_updated TEXT, first_appeared_in_issue TEXT, publisher TEXT, site_detail_url TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT)");
 database.exec("CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, count_of_issue_appearances INTEGER, date_added TEXT, first_appeared_in_issue TEXT, publisher TEXT, site_detail_url TEXT, issues TEXT, movies TEXT)");
-database.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, birth TEXT, count_of_issue_appearances INTEGER, country TEXT, date_added TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, created_characters TEXT, issue_credits TEXT, story_arc_credits TEXT, volume_credits TEXT, site_detail_url TEXT)");
+database.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT, birth TEXT, count_of_issue_appearances INTEGER, country TEXT, date_added TEXT, date_last_updated TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, image_url TEXT, created_characters TEXT, issue_credits TEXT, story_arc_credits TEXT, volume_credits TEXT, site_detail_url TEXT)");
 database.prepare("INSERT INTO cv_publisher (id, name, site_detail_url, aliases, date_added, location_address, location_city, location_state, characters, story_arcs, teams, volumes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run(4, "Dell", "https://example.test/dell/", "Dell Comics", "2020-04-15 10:00:00", "750 Third Avenue", "New York", "NY", J([{ id: 17, name: "Daredevil" }]), J([]), J([]), J([]));
 database.prepare("INSERT INTO cv_publisher (id, name, site_detail_url, aliases, date_added) VALUES (?, ?, ?, ?, ?)")
@@ -38,8 +38,8 @@ database.prepare("INSERT INTO cv_storyarc (id, name, aliases, count_of_issue_app
     .run(3000, "Secret Wars", "Secret Wars (1984)", 12, "2020-04-15 10:00:00", J({ id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }), J({ id: 31, name: "Marvel" }), "https://example.test/secret-wars/", J([{ id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }]), J([]));
 database.prepare("INSERT INTO cv_storyarc (id, name, date_added) VALUES (?, ?, ?)")
     .run(3001, "Civil War", "1899-01-01 00:00:00");
-database.prepare("INSERT INTO cv_person (id, name, aliases, birth, count_of_issue_appearances, country, date_added, death, gender, hometown, email, website, created_characters, issue_credits, story_arc_credits, volume_credits, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(1251, "Barry Kitson", "Barry Kitson (artist)", null, 180, "United Kingdom", "2020-04-15 10:00:00", null, "Male", "Leicester", "barry@example.test", "https://example.test/barry", J([{ id: 9081, name: "The Amazing Bug" }]), J([]), J([]), J([{ id: 120, name: "Sample Volume" }]), "https://example.test/barry-kitson/");
+database.prepare("INSERT INTO cv_person (id, name, aliases, api_detail_url, birth, count_of_issue_appearances, country, date_added, date_last_updated, death, gender, hometown, email, website, image_url, created_characters, issue_credits, story_arc_credits, volume_credits, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(1251, "Barry Kitson", "Barry Kitson (artist)", "https://comicvine.gamespot.com/api/person/4040-1251/", null, 180, "United Kingdom", "2020-04-15 10:00:00", "2021-05-01 08:30:00", null, "1", "Leicester", "barry@example.test", "https://example.test/barry", "https://example.test/barry.jpg", J([{ id: 9081, name: "The Amazing Bug" }]), J([]), J([]), J([{ id: 120, name: "Sample Volume" }]), "https://example.test/barry-kitson/");
 database.prepare("INSERT INTO cv_person (id, name, date_added) VALUES (?, ?, ?)")
     .run(1252, "Alex Ross", "1899-01-01 00:00:00");
 database.close();
@@ -477,7 +477,7 @@ test("supports people fields, sorting, pagination, and filters", async () => {
     birth: null,
     death: null,
     country: "United Kingdom",
-    gender: "Male",
+    gender: 1,
     hometown: "Leicester",
     email: "barry@example.test",
     website: "https://example.test/barry"
@@ -548,7 +548,8 @@ test("honors the defaultSort option for unsorted list endpoints (SRV-1)", async 
 });
 
 test("serves singular person details with relationship fields", async () => {
-  const fields = "id,name,created_characters,issue_credits,story_arc_credits,volume_credits";
+  // SRV-20: the live API names the person's issue credits `issues` (not issue_credits).
+  const fields = "id,name,created_characters,issues,story_arc_credits,volume_credits";
   const response = await fetch(`${baseUrl}/api/person/4040-1251/?format=json&field_list=${fields}`);
   const body = await response.json();
 
@@ -557,14 +558,39 @@ test("serves singular person details with relationship fields", async () => {
     id: 1251,
     name: "Barry Kitson",
     created_characters: [{ id: 9081, name: "The Amazing Bug" }],
-    issue_credits: [],
+    issues: [],
     story_arc_credits: [],
     volume_credits: [{ id: 120, name: "Sample Volume" }]
   });
 
-  const xml = await fetch(`${baseUrl}/api/person/4040-1251/?format=xml&field_list=id,name,issue_credits`);
+  const xml = await fetch(`${baseUrl}/api/person/4040-1251/?format=xml&field_list=id,name,issues`);
   assert.match(xml.headers.get("content-type"), /application\/xml/);
-  assert.match(await xml.text(), /<issue_credits><\/issue_credits>/);
+  assert.match(await xml.text(), /<issues><\/issues>/);
+});
+
+test("emits the full person shape with live names and types (SRV-20)", async () => {
+  const response = await fetch(`${baseUrl}/api/person/4040-1251/?format=json`);
+  const body = await response.json();
+  const person = body.results;
+
+  assert.equal(response.status, 200);
+  // The four previously-dropped stored fields are now emitted.
+  assert.equal(person.api_detail_url, "https://comicvine.gamespot.com/api/person/4040-1251/");
+  assert.equal(person.date_added, "2020-04-15 10:00:00");
+  assert.equal(person.date_last_updated, "2021-05-01 08:30:00");
+  assert.equal(person.death, null);
+  // The internal image_url column no longer leaks; image is built from it.
+  assert.equal(Object.hasOwn(person, "image_url"), false);
+  assert.equal(person.image.original_url, "https://example.test/barry.jpg");
+  // The count uses the live API's typo name; the corrected spelling is not emitted.
+  assert.equal(person.count_of_isssue_appearances, 180);
+  assert.equal(Object.hasOwn(person, "count_of_issue_appearances"), false);
+  // The issue credits use the live name `issues`; `issue_credits` is not emitted.
+  assert.deepEqual(person.issues, []);
+  assert.equal(Object.hasOwn(person, "issue_credits"), false);
+  // gender is a number (the stored TEXT "1" is coerced), matching the live API.
+  assert.equal(person.gender, 1);
+  assert.equal(typeof person.gender, "number");
 });
 
 test("rejects unprefixed resource routes", async () => {

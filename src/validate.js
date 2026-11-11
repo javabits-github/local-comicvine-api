@@ -42,6 +42,7 @@ const IGNORED_FIELDS = new Set([
   "associated_images",
   "count_of_issues",
   "count_of_issue_appearances",
+  "count_of_isssue_appearances",
   "count_of_team_members"
 ]);
 

@@ -40,14 +40,17 @@ const publisherFields = new Set([
   "name", "site_detail_url", "story_arcs", "teams", "volumes"
 ]);
 const publisherRelationshipFields = new Set(["characters", "story_arcs", "teams", "volumes"]);
+// SRV-20: the live API emits the person's issue credits as `issues` and the
+// appearance count under its typo name `count_of_isssue_appearances`; the allowlist
+// uses the live names so field_list matches the live API.
 const personFields = new Set([
-  "aliases", "api_detail_url", "birth", "count_of_issue_appearances", "country",
+  "aliases", "api_detail_url", "birth", "count_of_isssue_appearances", "country",
   "created_characters", "date_added", "date_last_updated", "death", "deck", "description",
-  "email", "gender", "hometown", "id", "image", "issue_credits", "name",
+  "email", "gender", "hometown", "id", "image", "issues", "name",
   "site_detail_url", "story_arc_credits", "volume_credits", "website"
 ]);
 const personRelationshipFields = new Set([
-  "created_characters", "issue_credits", "story_arc_credits", "volume_credits"
+  "created_characters", "issues", "story_arc_credits", "volume_credits"
 ]);
 
 // SRV-19: image is included — the live API returns it for issues (built from the
