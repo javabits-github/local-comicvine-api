@@ -96,6 +96,25 @@ npm sync:full -- --yes   # confirm the full sync without an interactive prompt
 
 `npm sync` runs the updater with `--env-file-if-exists=.env`, so `COMICVINE_API_KEY` is read from `.env` (or the `--api-key` flag, or the `COMICVINE_API_KEY` environment variable). The updater opens the database in WAL mode, upserts each resource into its `cv_*` table (all bound values go through a JSON serializer), and advances `cv_sync_metadata.last_sync_date` only for endpoints that succeed. It reuses the server's `field_list` projection and the live API's retry contract (107 → escalating backoff, 100 → abort, 420 → wait). The original Python updater's email report and GUI database picker (`smtplib`/`tkinter`) have no zero-dependency Node equivalent and are not implemented. The full flag reference lives in the updater's `--help` output and its header comment.
 
+## Raw API sync
+
+The rawapi sync is a zero-dependency Node.js script ([src/rawapi.js](src/rawapi.js)) — a third process, distinct from the server and the updater — that keeps the **rawapi database** in step with the live ComicVine API. Where the updater normalizes the API into typed columns for `localcv.db` (the served API), rawapi stores each entity's **verbatim** JSON so the static snapshot doubles as a structural ground-truth record of exactly what the live API returns.
+
+The rawapi database (`comicvine_rawapi_*.db`, gitignored) holds eleven `cv_*` tables, each with one uniform shape: `id` (PK), `date_last_updated`, `site_detail_url`, and `raw_api_response`. The `raw_api_response` column is the API's `results` object serialized with `JSON.stringify`; `date_last_updated` and `site_detail_url` are denormalized from the top-level fields of that JSON.
+
+```powershell
+npm run rawapi          # incremental sync (since the last sync date)
+npm run rawapi:full     # one-time full refresh (~1.5M live API calls)
+```
+
+A full sync makes one detail call per entity across all eleven tables (~1.5M calls, dominated by the ~1.1M issues), so it is gated behind the same confirmation as the updater:
+
+```powershell
+npm run rawapi:full -- --yes   # confirm the full sync without an interactive prompt
+```
+
+Each resource runs a two-phase pass: a cheap `field_list=id` list call collects the ids changed since the last sync, then one detail call per id fetches the full object to store verbatim. Resources sync smallest-first so the largest table (`cv_issue`) is always done **last**. The database is updated **in place** (no dated-copy mechanism); the default target is the most recent `comicvine_rawapi_*.db` in the current directory, overridable with `--db`. `COMICVINE_API_KEY` is read from `.env` (or the `--api-key` flag / environment). The full flag reference lives in the script's `--help` output and its header comment.
+
 ## Docker
 
 Both the server ([src/server.js](src/server.js)) and the updater ([src/updater.js](src/updater.js)) are zero-dependency Node.js, so a single slim `node:26` image ([Dockerfile](Dockerfile)) runs either — there is no `npm install`. The database is **not** baked into the image: `localcv.db` is gitignored and multi-GB, so it is supplied at runtime as a volume mounted at `/data`, and both entry points are pointed at it via `COMICVINE_DB_PATH` / `--db`.
@@ -129,6 +148,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-11-11 — Raw API sync process (RAW-1)
+
+- **Context:** `comicvine_rawapi_20260122.db` (11 GB, gitignored) is a verbatim dump of the live-API JSON — 11 `cv_*` tables, each row holding the exact API response — and proved extremely useful as the structural ground truth for [docs/structure-validation-2026-11-10.md](docs/structure-validation-2026-11-10.md), but it was a static January-2026 snapshot with no way to refresh it.
+- **Change:** a new [src/rawapi.js](src/rawapi.js) + `npm run rawapi` / `npm run rawapi:full` — a third process, distinct from the server and the updater — keeps the rawapi database in step with the live API. All 11 `cv_*` tables share one uniform shape (`id`, `date_last_updated`, `site_detail_url`, `raw_api_response`); for every entity changed since the last sync, rawapi fetches the entity's **full detail object** and stores it **verbatim** (`JSON.stringify` of the API's `results` object) — the exact live-API shape, not the normalized columns the updater writes. Resources sync smallest-first so the largest table (`cv_issue`, ~1.1M rows) is always done **last** (per the request that issue be synced last). Each resource runs the updater's two-phase pattern (a cheap `field_list=id` list call to collect the changed ids, then one detail call per id) with the updater's rate-limit/backoff and `cv_sync_metadata` resume tracking; a list call that still fails after all retries skips that table and the sync continues. The database is updated **in place** (no dated-copy mechanism); the default target is the most recent `comicvine_rawapi_*.db` in the cwd, overridable with `--db`. A full sync (~1.5M detail calls) is gated behind the same `--full`/`--yes` confirmation as the updater. New tests in [test/rawapi.test.js](test/rawapi.test.js) cover verbatim storage, issue-synced-last ordering, metadata seeding, resume-skip, the upsert-updates-in-place path, the 401-skip-table path, and the transient-100 retry; full suite 77/77 green. Also verified live end-to-end on a copy of the 11 GB snapshot: 33 entities (4 volumes, 29 issues) synced from the real API, and every stored `raw_api_response` deep-equals a fresh live re-fetch.
+- **Gotcha / follow-up:** the list endpoints intermittently return HTTP 401 / status 100 ("Invalid API Key") for a **valid** key under load — a transient rate-limit artifact that clears after ~30s (the detail endpoints are unaffected). rawapi therefore retries a 100 with a 30 s backoff instead of treating it as a hard failure the way the updater does, and `validateApiKey` retries a 100 before declaring the key bad. The stored JSON is `JSON.stringify` of the current live-API `results` object (compact, current key order) — it is *not* byte-identical to the January dump, whose keys were in a different (non-alphabetic) order and spaced; the key set and values are what matter for the structural-ground-truth use case, and tracking the *current* live API is the goal.
 
 #### 2026-11-11 — Team responses match the live API shape (SRV-22)
 

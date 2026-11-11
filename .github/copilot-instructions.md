@@ -40,11 +40,11 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 ## Conventions and gotchas
 
 - **Windows environment** (this machine): `node -e` with complex quotes breaks in PowerShell — write a temp `.js` file to the session files folder and run the file instead. `os.remove`/`fs.rmSync` on a just-closed SQLite DB fails with WinError 32 (WAL mode) — close all connections first or delete after the process exits.
-- All `*.db` files (live DB, dated snapshots, raw dumps, `-wal`/`-shm`) are gitignored and excluded from indexing — never commit or read them as text.
+- All `*.db` files (live DB, dated snapshots, raw dumps, the rawapi DB `comicvine_rawapi_*.db`, `-wal`/`-shm`) are gitignored and excluded from indexing — never commit or read them as text.
 - Track open work in `TODO.md` using its item IDs (SRV-n, UPD-n, DB-n, DOC-n); mark items `[x]` when done.
 - Developer decisions are journaled in the Developer Notes section of `README.md` (newest entry on top).
 
 ## Docs
 
-- `README.md` — server usage, endpoints, env vars, and updater sync commands; the Node updater's full flag reference lives in its sync section and the `src/updater.js` header
+- `README.md` — server usage, endpoints, env vars, updater sync commands, and the rawapi sync (`npm run rawapi`, [src/rawapi.js](../src/rawapi.js)); the full flag references live in each sync section and the `src/updater.js` / `src/rawapi.js` headers
 - `TODO.md` — open items with IDs
