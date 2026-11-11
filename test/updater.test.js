@@ -19,6 +19,7 @@ before(() => {
     CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, object_credits TEXT, concept_credits TEXT, character_died_in TEXT, team_disbanded_in TEXT, first_appearance_characters TEXT, first_appearance_concepts TEXT, first_appearance_locations TEXT, first_appearance_objects TEXT, first_appearance_storyarcs TEXT, first_appearance_teams TEXT, has_staff_review INTEGER);
     CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_team_members INTEGER, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT);
     CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, issues TEXT, movies TEXT);
+    CREATE TABLE cv_concept (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, count_of_issue_appearances INTEGER, start_year TEXT);
     CREATE TABLE cv_sync_metadata (endpoint TEXT PRIMARY KEY, last_sync_date TEXT NOT NULL, last_sync_timestamp TEXT NOT NULL, resume_state TEXT);
   `);
   db.close();
@@ -147,6 +148,20 @@ function makeMockFetch() {
           first_appeared_in_issue: { id: 4001, name: "Test Series #1" }
         }];
       }
+    } else if (ep.includes("/concepts/")) {
+      if (offset === 0) {
+        results = [{
+          id: 700, name: "Test Concept", aliases: "TC",
+          api_detail_url: "https://example.com/c/700",
+          count_of_isssue_appearances: 9,
+          deck: "A concept", description: "A concept desc",
+          date_added: "2020-01-01 00:00:00", date_last_updated: "2026-01-01 00:00:00",
+          image: { original_url: "https://example.com/concept.png" },
+          site_detail_url: "https://example.com/site/700",
+          first_appeared_in_issue: { id: 4001, name: "Test Series #1" },
+          start_year: "2005"
+        }];
+      }
     }
     return { status: 200, ok: true, json: async () => ({ status_code: 1, results, number_of_total_results: results.length }) };
   };
@@ -207,18 +222,34 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   const arc = db.prepare("SELECT * FROM cv_storyarc WHERE id=600").get();
   assert.equal(arc.name, "Test Arc");
 
+  // Concept
+  const concept = db.prepare("SELECT * FROM cv_concept WHERE id=700").get();
+  assert.equal(concept.name, "Test Concept");
+  assert.equal(concept.aliases, "TC");
+  assert.equal(concept.count_of_issue_appearances, 9);
+  assert.equal(concept.start_year, "2005");
+  assert.equal(concept.image_url, "https://example.com/concept.png");
+  const conceptFirstAppeared = JSON.parse(concept.first_appeared_in_issue);
+  assert.equal(conceptFirstAppeared.id, 4001);
+
   // Metadata
   const meta = db.prepare("SELECT * FROM cv_sync_metadata WHERE endpoint='publishers'").get();
   assert.ok(meta);
   assert.ok(meta.last_sync_date);
+  const conceptMeta = db.prepare("SELECT * FROM cv_sync_metadata WHERE endpoint='concepts'").get();
+  assert.ok(conceptMeta);
+  assert.ok(conceptMeta.last_sync_date);
 
   // SRV-5: runSync creates an FTS5 trigram index for each resource table and
   // rebuilds it after the sync, so the indexes are populated with the new rows.
   const ftsTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts' ORDER BY name").all().map((r) => r.name);
   assert.ok(ftsTables.includes("cv_volume_fts"), `expected cv_volume_fts, got ${ftsTables.join(", ")}`);
   assert.ok(ftsTables.includes("cv_issue_fts"));
+  assert.ok(ftsTables.includes("cv_concept_fts"), `expected cv_concept_fts, got ${ftsTables.join(", ")}`);
   const ftsRows = db.prepare("SELECT COUNT(*) AS c FROM cv_volume_fts").get().c;
   assert.ok(ftsRows >= 1, `expected cv_volume_fts to be populated, got ${ftsRows}`);
+  const conceptFtsRows = db.prepare("SELECT COUNT(*) AS c FROM cv_concept_fts").get().c;
+  assert.ok(conceptFtsRows >= 1, `expected cv_concept_fts to be populated, got ${conceptFtsRows}`);
 
   db.close();
   assert.ok(calls.length > 0, "API calls were made");

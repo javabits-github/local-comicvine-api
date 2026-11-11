@@ -33,7 +33,7 @@ flowchart TB
     EN --> FM[format: json / xml / jsonp]
     FM --> C
 
-    subgraph DB [localcv.db — 6 tables]
+    subgraph DB [localcv.db — 7 tables]
         Q
         PUB[cv_publisher]
         VOL[cv_volume]
@@ -41,6 +41,7 @@ flowchart TB
         PER[cv_person]
         TEAM[cv_team]
         ARC[cv_storyarc]
+        CON[cv_concept]
         VOL -. publisher_id .-> PUB
         ISS -. volume_id .-> VOL
     end
@@ -86,8 +87,9 @@ flowchart TB
     SYNC --> SI[syncIssues]
     SYNC --> ST[syncTeams]
     SYNC --> SA[syncStoryarcs]
+    SYNC --> SC[syncConcepts]
 
-    SP & SP2 & SV & SI & ST & SA --> J["jsonify every bound value<br/>obj → JSON text, bool → 1/0"]
+    SP & SP2 & SV & SI & ST & SA & SC --> J["jsonify every bound value<br/>obj → JSON text, bool → 1/0"]
     J --> U[(upsert into cv_* tables)]
     U --> M[cv_sync_metadata<br/>last_sync_date — advanced only on success]
     M --> POST[recalc volume issue counts<br/>+ rebuild FTS index]
@@ -175,6 +177,14 @@ erDiagram
         TEXT issues "JSON"
         TEXT movies "JSON"
     }
+    cv_concept {
+        INTEGER id PK
+        TEXT name
+        TEXT aliases
+        TEXT first_appeared_in_issue "JSON object"
+        INTEGER count_of_issue_appearances
+        TEXT start_year
+    }
 
     cv_volume ||--o{ cv_issue : volume_id
     cv_publisher ||--o{ cv_volume : publisher_id
@@ -196,7 +206,7 @@ Notes on the schema:
 - `cv_sync_metadata` (endpoint, last_sync_date, last_sync_timestamp, resume_state) tracks updater progress per endpoint — not shown above.
 - **`cv_volume` is normalized (SRV-6c):** its credit collections and first/last issue references live in the `cv_volume_credit` / `cv_volume_issue_ref` join tables, not JSON columns (the JSON columns are dropped by the updater backfill). `credits_presence` is a bitmask the server uses to tell an empty `[]` from a `null` collection. The other tables still store their relationships as JSON text (dotted edges) and are staged for the same treatment (SRV-6a/b/d/e/f).
 - **`cv_volume_issue_ref` is a true join to `cv_issue`:** it stores only the issue `id` (FK) and the emitted `key_order`; the server resolves `name`/`issue_number`/`api_detail_url` by joining `cv_issue`. Unlike the credit entities (no local table), issues *do* have a local table, so the denormalized snapshot is not needed. A `LEFT JOIN` keeps a ref whose issue id isn't in the (synced-subset) `cv_issue` table, emitting the id with `null` display fields.
-- Referenced ids inside JSON collections usually do **not** resolve to local rows (the DB is a synced subset), and character/location/object/concept/movie have no local table at all — the denormalized fields inside the JSON are the only source of that data. In `cv_volume_credit` the credit rows likewise keep `name`/`api_detail_url`/`site_detail_url` inline for the same reason.
+- Referenced ids inside JSON collections usually do **not** resolve to local rows (the DB is a synced subset), and character/location/object/movie have no local table at all — the denormalized fields inside the JSON are the only source of that data. In `cv_volume_credit` the credit rows likewise keep `name`/`api_detail_url`/`site_detail_url` inline for the same reason.
 - `comicdb_*.db` (raw dumps), dated `localcv-*.db` snapshots, and the FTS tables (`volume_fts*`, `comic_covers`, `comic_files`) are out of scope for the API and excluded here.
 
 ## Notes

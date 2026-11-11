@@ -48,7 +48,7 @@ With no `?sort=`, a list endpoint uses a **default sort column** — `id ASC` by
 
 ## Endpoints
 
-The configured `localcv.db` provides volumes, issues, publishers, people, teams, and story arcs. These endpoints use the ComicVine response envelope; volumes, publishers, people, teams, and story arcs also support field selection, sorting, filters, and JSON, XML, or JSONP formats. Issue list and detail responses also honor `field_list`, omitting unrequested fields such as the credit arrays; unrecognized field names are ignored. An issue's `volume` object includes `id`, `name`, `api_detail_url`, and `site_detail_url`; `api_detail_url` is derived from the volume ID when it is not stored in the database. Issue filters on `volume` or `volume_id` compare exact IDs and accept either a number or ComicVine ID such as `4050-7300`. Each resource reads its normalized columns directly from the database; credit arrays and relationship objects are stored as JSON text and parsed on demand, so no raw API payload is stored in `localcv.db`. Resources whose tables are absent return 404.
+The configured `localcv.db` provides volumes, issues, publishers, people, teams, story arcs, and concepts. These endpoints use the ComicVine response envelope; volumes, publishers, people, teams, story arcs, and concepts also support field selection, sorting, filters, and JSON, XML, or JSONP formats. Issue list and detail responses also honor `field_list`, omitting unrequested fields such as the credit arrays; unrecognized field names are ignored. An issue's `volume` object includes `id`, `name`, `api_detail_url`, and `site_detail_url`; `api_detail_url` is derived from the volume ID when it is not stored in the database. Issue filters on `volume` or `volume_id` compare exact IDs and accept either a number or ComicVine ID such as `4050-7300`. Each resource reads its normalized columns directly from the database; credit arrays and relationship objects are stored as JSON text and parsed on demand, so no raw API payload is stored in `localcv.db`. Resources whose tables are absent return 404.
 
 ```text
 GET /api/issues/?limit=10&offset=0
@@ -88,7 +88,7 @@ npm sync          # incremental sync (since the last sync date)
 npm sync:full     # one-time full refresh (no date filter; thousands of live API calls)
 ```
 
-A full sync is expensive (one unfiltered call per page across all six endpoints ≈ ~1.1M issue-detail calls; at the 200-calls/hour rate limit it runs for weeks and cannot be parallelized), so it is gated behind a confirmation. In an interactive run the updater prints a warning and asks you to type `yes`; in a non-interactive run it aborts unless you confirm explicitly:
+A full sync is expensive (one unfiltered call per page across all seven endpoints ≈ ~1.1M issue-detail calls; at the 200-calls/hour rate limit it runs for weeks and cannot be parallelized), so it is gated behind a confirmation. In an interactive run the updater prints a warning and asks you to type `yes`; in a non-interactive run it aborts unless you confirm explicitly:
 
 ```powershell
 npm sync:full -- --yes   # confirm the full sync without an interactive prompt
@@ -129,7 +129,13 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
- 
+  
+#### 2026-11-10 — Concept table and sync (DB-2)
+
+- **Context:** the `concept` resource was already declared in the server (`resources`, `fieldConfig`, `buildResult` — commit f1f9ae4), but `localcv.db` had no `cv_concept` table, so the concepts list/detail endpoints 404'd (SRV-3) and the updater never synced concepts.
+- **Change:** [src/updater.js](src/updater.js) now creates `cv_concept` (id PK plus `name`, `aliases`, `api_detail_url`, `deck`, `description`, `date_added`, `date_last_updated`, `image_url`, `site_detail_url`, `first_appeared_in_issue`, `count_of_issue_appearances`, `start_year`) and syncs it from the live `concepts/` endpoint via a new `syncConcepts` following the `syncPersons`/`syncTeams` pattern: `jsonify` on every bound value, per-page transactions, `cv_sync_metadata` tracking, and a `cv_concept_fts` trigram index so search picks it up. The server needed no changes — its concept branch activates as soon as the table exists.
+- **Gotcha / follow-up:** the raw dump that built `localcv.db` never contained concepts, so the `cv_sync_metadata` seed (`2026-01-22`) means the first incremental sync only fetches concepts updated since that date; run `npm sync:full` (or `--start-date`) for full history. SRV-3 remains open for character, location, object, and power.
+
 #### 2026-11-10 — Auto-recover missing volumes during issue sync (UPD-4)
  
 - **Context:** the FK diagnostics from UPD-6 surfaced the *root cause* of the issue-sync FK failures: the local `localcv.db` is a synced subset, and an issue's `volume_id` can reference a `cv_volume` row that has no local row (e.g. a volume whose update window the volume sync didn't cover, or a volume that never made the subset). With `PRAGMA foreign_keys=ON`, the issue upsert threw `FOREIGN KEY constraint failed` and the whole issue endpoint aborted.

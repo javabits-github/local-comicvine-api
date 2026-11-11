@@ -4,7 +4,7 @@
  *
  * A stand-alone script to keep a localcv.db SQLite database updated with
  * new ComicVine data. Fetches publishers, people, volumes, issues, teams,
- * and story arcs that have been added or modified since the last sync.
+ * story arcs, and concepts that have been added or modified since the last sync.
  *
  * Uses node:sqlite + global fetch (zero npm dependencies).
  *
@@ -21,7 +21,7 @@
  * npm run sync          — incremental sync
  * npm run sync:full     — one-time full sync (thousands of API calls)
  *
- * A full sync is expensive (one call per page across all six endpoints, i.e.
+ * A full sync is expensive (one call per page across all seven endpoints, i.e.
  * ~1.1M issue-detail calls). It is gated behind an interactive "yes" prompt,
  * or the --yes flag in non-interactive runs (UPD-2).
  */
@@ -129,6 +129,7 @@ class ComicVineUpdater {
       issues_added: 0, issues_updated: 0,
       teams_added: 0, teams_updated: 0,
       storyarcs_added: 0, storyarcs_updated: 0,
+      concepts_added: 0, concepts_updated: 0,
       api_calls: 0
     };
   }
@@ -263,10 +264,18 @@ class ComicVineUpdater {
         site_detail_url TEXT, first_appeared_in_issue TEXT, issues TEXT, movies TEXT
       )
     `);
+    this.conn.exec(`
+      CREATE TABLE IF NOT EXISTS cv_concept (
+        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT,
+        deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
+        image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT,
+        count_of_issue_appearances INTEGER, start_year TEXT
+      )
+    `);
     // Seed last_sync_date for new endpoints at the raw-dump snapshot date.
     const snapshot = "2026-01-22";
     const timestamp = new Date().toISOString();
-    for (const endpoint of ["teams", "storyarcs"]) {
+    for (const endpoint of ["teams", "storyarcs", "concepts"]) {
       this.conn.prepare(
         `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
          VALUES (?, ?, ?)
@@ -455,7 +464,7 @@ class ComicVineUpdater {
 
   // ─── SRV-5: FTS5 full-text search indexes ────────────────────────────────
 
-  // The six resource tables, in the order the server searches them. Each is
+  // The seven resource tables, in the order the server searches them. Each is
   // indexed on the searchable text columns (name, aliases, deck, description);
   // the trigram tokenizer is case-insensitive and matches substrings, which is
   // the same semantics the server's legacy LIKE matching used (SRV-5).
@@ -466,7 +475,8 @@ class ComicVineUpdater {
       { table: "cv_volume", fts: "cv_volume_fts" },
       { table: "cv_issue", fts: "cv_issue_fts" },
       { table: "cv_team", fts: "cv_team_fts" },
-      { table: "cv_storyarc", fts: "cv_storyarc_fts" }
+      { table: "cv_storyarc", fts: "cv_storyarc_fts" },
+      { table: "cv_concept", fts: "cv_concept_fts" }
     ];
   }
 
@@ -1317,6 +1327,87 @@ class ComicVineUpdater {
     this.setEndpointLastSync("storyarcs", endDate);
   }
 
+  async syncConcepts(startDate, endDate, full = false) {
+    this.log(`\n--- Syncing Concepts ---${full ? " (FULL)" : ""}`);
+    if (!this.conn) return;
+
+    let offset = 0;
+    const limit = 100;
+
+    while (true) {
+      const params = {
+        field_list: "id,name,aliases,api_detail_url,count_of_isssue_appearances," +
+          "deck,description,date_added,date_last_updated,image," +
+          "site_detail_url,first_appeared_in_issue,start_year",
+        offset, limit
+      };
+      if (!full) params.filter = `date_last_updated:${startDate}|${endDate}`;
+      params.sort = "date_last_updated:asc";
+
+      const data = await this.apiCall("concepts/", params);
+      if (!data) throw new Error("API call failed for concepts");
+
+      const results = data.results || [];
+      if (results.length === 0) break;
+
+      this.conn.exec("BEGIN");
+      for (const concept of results) {
+        const conceptId = concept.id;
+        if (!conceptId) continue;
+
+        const image = concept.image || null;
+        const imageUrl = image ? image.original_url : null;
+        const exists = this.conn.prepare("SELECT id FROM cv_concept WHERE id = ?").get(conceptId);
+
+        const countOfIssueAppearances =
+          concept.count_of_isssue_appearances || concept.count_of_issue_appearances;
+        const firstAppeared = concept.first_appeared_in_issue
+          ? JSON.stringify(concept.first_appeared_in_issue)
+          : null;
+
+        this.conn.prepare(`
+          INSERT INTO cv_concept
+            (id, name, aliases, api_detail_url, deck, description,
+             date_added, date_last_updated, image_url, site_detail_url,
+             first_appeared_in_issue, count_of_issue_appearances, start_year)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            aliases = excluded.aliases,
+            api_detail_url = excluded.api_detail_url,
+            deck = excluded.deck,
+            description = excluded.description,
+            date_added = excluded.date_added,
+            date_last_updated = excluded.date_last_updated,
+            image_url = excluded.image_url,
+            site_detail_url = excluded.site_detail_url,
+            first_appeared_in_issue = COALESCE(excluded.first_appeared_in_issue, cv_concept.first_appeared_in_issue),
+            count_of_issue_appearances = excluded.count_of_issue_appearances,
+            start_year = excluded.start_year
+        `).run(
+          conceptId, jsonify(concept.name), jsonify(concept.aliases),
+          concept.api_detail_url,
+          jsonify(concept.deck), jsonify(concept.description),
+          jsonify(concept.date_added), jsonify(concept.date_last_updated),
+          imageUrl, concept.site_detail_url, firstAppeared,
+          jsonify(countOfIssueAppearances), jsonify(concept.start_year)
+        );
+
+        if (exists) this.stats.concepts_updated++;
+        else this.stats.concepts_added++;
+      }
+      this.conn.exec("COMMIT");
+
+      const total = data.number_of_total_results || 0;
+      this.log(`  Processed ${offset + results.length}/${total} concepts`);
+
+      if (results.length < limit) break;
+      offset += limit;
+    }
+
+    this.setEndpointLastSync("concepts", endDate);
+  }
+
   // ─── Post-sync maintenance ──────────────────────────────────────────────
 
   recalculateVolumeIssueCounts() {
@@ -1411,6 +1502,8 @@ class ComicVineUpdater {
     this.log(`Teams updated:      ${s.teams_updated}`, { force: true });
     this.log(`Story arcs added:   ${s.storyarcs_added}`, { force: true });
     this.log(`Story arcs updated: ${s.storyarcs_updated}`, { force: true });
+    this.log(`Concepts added:     ${s.concepts_added}`, { force: true });
+    this.log(`Concepts updated:   ${s.concepts_updated}`, { force: true });
   }
 
   async runSync(startDate = null) {
@@ -1427,7 +1520,8 @@ class ComicVineUpdater {
       { name: "volumes", method: "syncVolumes", label: "volumes" },
       { name: "issues", method: "syncIssues", label: "issues" },
       { name: "teams", method: "syncTeams", label: "teams" },
-      { name: "storyarcs", method: "syncStoryarcs", label: "story arcs" }
+      { name: "storyarcs", method: "syncStoryarcs", label: "story arcs" },
+      { name: "concepts", method: "syncConcepts", label: "concepts" }
     ];
 
     for (const ep of endpoints) {
@@ -1605,7 +1699,7 @@ function cleanupOldDatabases(dbDir, keepDays = 7, verbose = true) {
 
 // ─── Full-Sync Confirmation (UPD-2) ─────────────────────────────────────────
 
-// A full sync issues one unfiltered call per page across all six endpoints.
+// A full sync issues one unfiltered call per page across all seven endpoints.
 // With the live API's ~1.1M issues and the 200-calls/hour rate limit, a full
 // pass cannot be parallelized and takes on the order of weeks of continuous
 // calls to complete. Gate it behind an explicit confirmation so it is never

@@ -27,7 +27,7 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 ## field_list projection
 
 - `projectResult` / `projectSearchFields` keep only requested fields; unrecognized names are ignored; unrequested fields fall back to their documented null defaults (do not drop keys — clients expect them).
-- Each resource has a field allowlist Set at the top of server.js (`volumeFields`, `personFields`, `teamFields`, `storyArcFields`, `publisherFields`, plus `sortable*Fields` and relationship-field Sets). **Add new response fields to the matching Set** or they will be stripped.
+- Each resource has a field allowlist Set in `src/fieldConfig.js` (`volumeFields`, `personFields`, `teamFields`, `storyArcFields`, `conceptFields`, `publisherFields`, `issueFields`, plus relationship-field Sets) and a `sortable*Fields` Set at the top of server.js. **Add new response fields to the matching Set** or they will be stripped.
 
 ## Limits
 
@@ -59,14 +59,14 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 
 - **volume**: publisher resolved via `LEFT JOIN cv_publisher` on `publisher_id` (no JSON column). When the SRV-6c join tables are present (backfill marker `credits_presence` + `cv_volume_credit`/`cv_volume_issue_ref` + `cv_issue`), `buildVolumeResult` generates the six credit collections from `cv_volume_credit` and `first_issue`/`last_issue` from `cv_volume_issue_ref` (a true join: `LEFT JOIN cv_issue` supplies `name`/`issue_number`/`api_detail_url`; a dangling id emits with null display fields). Otherwise the JSON columns are parsed by `parseCredits`/`parseJsonColumn` (the path for test fixtures).
 - **issue**: volume object built from the joined `cv_volume` row; `api_detail_url` falls back to the deterministic `https://comicvine.gamespot.com/api/volume/4050-<id>/` when absent.
-- **team / story_arc**: `publisher` and `first_appeared_in_issue` are JSON object columns parsed with `parseJsonColumn`.
+- **team / story_arc / concept**: `first_appeared_in_issue` is a JSON object column parsed with `parseJsonColumn` (team / story_arc also have a `publisher` JSON object column).
 - **person / publisher**: relationship collections parsed from JSON text columns.
 
 ## Ordering
 
 - Search: volumes `start_year DESC`, issues numeric `issue_number ASC` (non-numeric specials last, then id), others `id`.
-- List: every list endpoint honors `?sort=` via `parseSort` + the per-resource allowlist in `sortableFieldsByResource` (`sortableVolumeFields`, `sortableIssueFields`, `sortablePersonFields`, `sortablePublisherFields`, `sortableStoryArcFields`, `sortableTeamFields`). With no `?sort=`, each resource uses its default sort column from `defaultSortByResource` (all `id` ASC by default, matching the live API); the `defaultSort` option on `createApiServer` (a field name or a per-resource map) or `COMICVINE_DEFAULT_SORT` overrides it. An unsupported `?sort=` field/direction → 400.
+- List: every list endpoint honors `?sort=` via `parseSort` + the per-resource allowlist in `sortableFieldsByResource` (`sortableVolumeFields`, `sortableIssueFields`, `sortablePersonFields`, `sortablePublisherFields`, `sortableStoryArcFields`, `sortableTeamFields`, `sortableConceptFields`). With no `?sort=`, each resource uses its default sort column from `defaultSortByResource` (all `id` ASC by default, matching the live API); the `defaultSort` option on `createApiServer` (a field name or a per-resource map) or `COMICVINE_DEFAULT_SORT` overrides it. An unsupported `?sort=` field/direction → 400.
 
 ## Validation when changing this file
 
-Run `npm test` (58 tests) — the suite in `test/server.test.js` pins the envelope, field_list, filter, sort, forced-limit, and FTS search behavior.
+Run `npm test` (60 tests) — the suite in `test/server.test.js` pins the envelope, field_list, filter, sort, forced-limit, and FTS search behavior.
