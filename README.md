@@ -81,7 +81,7 @@ Search accepts comma-separated `resources`, matches query text against names onl
 
 ## Syncing Data
 
-The updater is a zero-dependency Node.js script ([src/updater.js](src/updater.js)) that syncs data from the live ComicVine API into `localcv.db` using `node:sqlite` and `fetch`. It is the Node port of the original Python updater (`sqlite_cv_updater/sqlite_cv_updater.py`), which remains for reference.
+The updater is a zero-dependency Node.js script ([src/updater.js](src/updater.js)) that syncs data from the live ComicVine API into `localcv.db` using `node:sqlite` and `fetch`.
 
 ```powershell
 npm sync          # incremental sync (since the last sync date)
@@ -94,7 +94,7 @@ A full sync is expensive (one unfiltered call per page across all six endpoints 
 npm sync:full -- --yes   # confirm the full sync without an interactive prompt
 ```
 
-`npm sync` runs the updater with `--env-file-if-exists=.env`, so `COMICVINE_API_KEY` is read from `.env`. The key is resolved in order: the `--api-key` flag, then the `comicvine_config.env` file, then the `COMICVINE_API_KEY` environment variable. The updater opens the database in WAL mode, upserts each resource into its `cv_*` table (all bound values go through a JSON serializer), and advances `cv_sync_metadata.last_sync_date` only for endpoints that succeed. It reuses the server's `field_list` projection and the live API's retry contract (107 → escalating backoff, 100 → abort, 420 → wait). The updater's email report and GUI database picker (Python `smtplib`/`tkinter`) have no zero-dependency Node equivalent and are not implemented. See [sqlite_cv_updater/README.md](sqlite_cv_updater/README.md) for the full flag reference.
+`npm sync` runs the updater with `--env-file-if-exists=.env`, so `COMICVINE_API_KEY` is read from `.env` (or the `--api-key` flag, or the `COMICVINE_API_KEY` environment variable). The updater opens the database in WAL mode, upserts each resource into its `cv_*` table (all bound values go through a JSON serializer), and advances `cv_sync_metadata.last_sync_date` only for endpoints that succeed. It reuses the server's `field_list` projection and the live API's retry contract (107 → escalating backoff, 100 → abort, 420 → wait). The original Python updater's email report and GUI database picker (`smtplib`/`tkinter`) have no zero-dependency Node equivalent and are not implemented. The full flag reference lives in the updater's `--help` output and its header comment.
 
 ## Docker
 
@@ -199,8 +199,8 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 #### 2026-10-30 — Full-text search (SRV-5)
 
 - **Context:** search and single-value text filters matched with `LIKE '%value%'`, a full table scan. The task was to move to a SQLite full-text index for faster, token-based search (SRV-5), which also supersedes the open SRV-4 question about `LIKE` semantics.
-- **Change:** the updater now creates one FTS5 trigram index per resource — `cv_*_fts` over `name`/`aliases`/`deck`/`description` (external-content, keyed on the base table's id) — in `ensureFtsTables()` (Node [src/updater.js](src/updater.js) and Python [sqlite_cv_updater/sqlite_cv_updater.py](sqlite_cv_updater/sqlite_cv_updater.py)) and rebuilds them in `rebuildFtsIndex()` after each sync. The server (`buildResourceConfig` in [src/server.js](src/server.js)) detects each `cv_*_fts` table and, via `ftsOrLike()`, runs search (on `name`) and single-value text filters against the index. The trigram tokenizer is case-insensitive and matches substrings, so the result set is unchanged relative to the old `LIKE`.
-- **Gotcha / follow-up:** the trigram tokenizer only matches values of **3+ characters**, so `ftsOrLike()` falls back to the legacy `LIKE` clause for shorter values and for any resource whose FTS table is absent or empty (`COUNT(*) = 0`) — this keeps test fixtures and pre-upgrade databases on the `LIKE` path. `/api/status` excludes the `cv_*_fts` tables from its table listing. Run a sync after upgrading to populate the indexes; until then the server transparently uses `LIKE`.
+- **Change:** the updater now creates one FTS5 trigram index per resource — `cv_*_fts` over `name`/`aliases`/`deck`/`description` (external-content, keyed on the base table's id) — in `ensureFtsTables()` ([src/updater.js](src/updater.js)) and rebuilds them in `rebuildFtsIndex()` after each sync. The server (`buildResourceConfig` in [src/server.js](src/server.js)) detects each `cv_*_fts` table and, via `ftsOrLike()`, runs search (on `name`) and single-value text filters against the index. The trigram tokenizer is case-insensitive and matches substrings, so the result set is unchanged relative to the old `LIKE`.
+- **Gotcha / follow-up:** the trigram tokenizer only matches values of **3+ characters**, so `ftsOrLike()` falls back to the legacy `LIKE` clause for shorter values and for any resource whose FTS table is absent or empty (`COUNT(*) = 0`) — this keeps test fixtures and pre-upgrade databases on the `LIKE` path. `/api/status` excludes the `cv_*_fts` tables from its table listing. Run a sync after upgrading to populate the indexes; until then the server transparently uses `LIKE`. (The FTS index code lives in [src/updater.js](src/updater.js); the original Python updater was removed from the repo in UPD-5.)
 
 #### 2026-10-30 — Node.js 26 upgrade
 
@@ -234,9 +234,9 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 
 #### 2026-10-29 — Node.js updater port (UPD-3)
 
-- **Context:** the sync updater was Python (`sqlite_cv_updater/sqlite_cv_updater.py`), so running a sync required a Python environment separate from the zero-dependency Node server.
+- **Context:** the sync updater was Python (borrowed from Logical-Feedback-543 for use with comicrack), so running a sync required a Python environment separate from the zero-dependency Node server.
 - **Change:** ported the updater to `src/updater.js` using `node:sqlite` and `fetch` (no npm dependencies), so sync and server share one runtime. Added `npm sync` / `npm sync:full`. The port preserves the field lists, the upsert SQL, the live API's retry contract (1.5s inter-call delay, 107 → 60s×attempt backoff, 100 → abort, 420 → 600s×attempt wait), the resume state, dated-database copy/cleanup, and the config-file/env key precedence. The Python `smtplib` email report and `tkinter` GUI picker have no zero-dependency Node equivalent and were dropped.
-- **Gotcha / follow-up:** `node:sqlite` rejects boolean binds (Python's `sqlite3` coerces `True`/`False` to 1/0), so `jsonify` maps booleans to `1`/`0`; PRAGMAs must go through `exec()` rather than a prepared statement. The Python script remains in the repo for reference.
+- **Gotcha / follow-up:** `node:sqlite` rejects boolean binds (Python's `sqlite3` coerces `True`/`False` to 1/0), so `jsonify` maps booleans to `1`/`0`; PRAGMAs must go through `exec()` rather than a prepared statement. The Python updater was removed from the repo when the Node port was adopted (UPD-5); its history is preserved in the git log.
 
 #### 2026-10-29 — Log levels and timestamps (SRV-10)
 
@@ -268,4 +268,4 @@ This project came into being because I was using Kapowarr and the comicvine api 
 
 The bulk of this project used Visual Code/Github Copilot. I initially used the free plan tied to github until I burned through the tokens (this took about a day). I then rewired copilot to use LM Studio Bionic running Qwen 3.8 27B Splash running on a M5 Mac Studio with 64 GB of RAM, my developer workstation is a Windows 11/13th Gen Intel with 128 GB of RAM. This works pretty well if you dial down Reasoning to none (LM Studio/Qwen Splash doesn't support low). I found that basically in Agent mode it was best to ask copilot to add a todo item to implement a specific feature and then review it, and eventually ask copilot to implement it. Also copilot would kind of just go along with some foundational decisions like using the initial database with the raw dumps without any complaints. Integration with Kapowarr also required some human in the loop diagnosing and debugging but for the most part copilot/qwen performed well.
 
-The updater for the normalized database was originally python code borrowed from Logical-Feedback-543 for use with comicrack. I've now migrated that code to node.js and am making modifications to the schema for the database that was used for that project.
+The updater for the normalized database was originally python code borrowed from Logical-Feedback-543 for use with comicrack. I've now migrated that code to node.js (the Python file was removed from the repo when the Node port was adopted) and am making modifications to the schema for the database that was used for that project.

@@ -8,12 +8,8 @@
 # Environment and credentials — supplied at runtime, never baked in.
 .env
 
-# Node / Python artifacts.
+# Node artifacts.
 node_modules/
-__pycache__/
-
-# The legacy Python updater is not part of the image (the Node updater is used).
-sqlite_cv_updater/
 
 # Docs, tooling, and VCS.
 docs/

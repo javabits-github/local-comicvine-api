@@ -3,18 +3,14 @@ node_modules/
 npm-debug.log*
 
 # Environment and credentials (hold COMICVINE_API_KEY, SMTP_PASS) — the
-# .env.example / comicvine_config.env.example templates are committed instead.
+# .env.example template is committed instead.
 .env
-sqlite_cv_updater/comicvine_config.env
 
 # Editor / IDE
 .vscode/
 
 # Docker runtime data (the database is mounted here at /data)
 data/
-
-# Python bytecode
-__pycache__/
 
 # Databases. All SQLite files are large (multi-GB) and are rebuilt by the
 # updater, so none are committed. This covers the live DB, dated snapshots,

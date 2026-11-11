@@ -21,7 +21,7 @@ Generate mermaid diagrams of this project. VS Code renders mermaid natively in m
 
 **Database** (`localcv.db`, gitignored): `cv_publisher`, `cv_volume`, `cv_issue`, `cv_person`, `cv_team`, `cv_storyarc` + `cv_sync_metadata`. FK-ish columns: `cv_volume.publisher_id → cv_publisher`, `cv_issue.volume_id → cv_volume`. Credit/relationship columns are JSON text (arrays of `{id, name, api_detail_url, site_detail_url}` — `role` for person credits, `count` for volume credits; objects for `death`, `birth`, `publisher`, `first_issue`, `last_issue`, `first_appeared_in_issue`).
 
-**Updater** (`src/updater.js`, Node.js, zero deps — `node:sqlite` + `fetch`; class `ComicVineUpdater`; the Python `sqlite_cv_updater/sqlite_cv_updater.py` is reference-only, do not diagram it):
+**Updater** (`src/updater.js`, Node.js, zero deps — `node:sqlite` + `fetch`; class `ComicVineUpdater`):
 - `main` → `validateApiKey` (100 aborts the whole run) → `--full` confirmation gate (UPD-2) → `runSync`.
 - `apiCall` retry loop (MAX_RETRIES 5): 107 → backoff 60s×attempt → retry; 420 → wait 600s×attempt → retry; 100 or exhausted → `null` (endpoint skipped, not a whole-run abort).
 - `runSync` → six `sync*` methods in order (publishers, people, volumes, issues, teams, storyarcs); all bound values through `jsonify` (object → JSON text, bool → 1/0); upsert into `cv_*`; `cv_sync_metadata.last_sync_date` advanced only on success; then `recalculateVolumeIssueCounts` + `rebuildFtsIndex`.

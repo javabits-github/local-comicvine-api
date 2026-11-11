@@ -52,7 +52,7 @@ flowchart TB
 
 ## Updater sync pipeline (`src/updater.js`)
 
-The updater is a zero-dependency Node.js script (`node:sqlite` + `fetch`), the port of the original `sqlite_cv_updater/sqlite_cv_updater.py` (kept for reference). Run it with `npm sync` (incremental) or `npm sync:full`.
+The updater is a zero-dependency Node.js script (`node:sqlite` + `fetch`). Run it with `npm sync` (incremental) or `npm sync:full`.
 
 ```mermaid
 flowchart TB

@@ -12,6 +12,5 @@ node_modules/
 __pycache__/
 *.pyc
 
-# Local credentials (never useful to the agent; the .example templates are indexed)
+# Local credentials (never useful to the agent; the .example template is indexed)
 .env
-comicvine_config.env

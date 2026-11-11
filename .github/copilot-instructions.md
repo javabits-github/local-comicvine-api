@@ -13,7 +13,7 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 
 - `src/server.js` is a single-file server using only `node:http` and `node:sqlite`. No npm dependencies.
 - `localcv.db` has six normalized tables (`cv_publisher`, `cv_volume`, `cv_issue`, `cv_person`, `cv_team`, `cv_storyarc`) plus `cv_sync_metadata`. Resources without a table (character, concept, location, object, power) return 404.
-- The updater is Node.js (`src/updater.js`) using `node:sqlite` and global `fetch` — zero npm dependencies, sharing the server's runtime. Its class is `ComicVineUpdater`. (The original Python updater, `sqlite_cv_updater/sqlite_cv_updater.py`, remains in the repo for reference only — do not use or extend it; the Node port is the tool to run.)
+- The updater is Node.js (`src/updater.js`) using `node:sqlite` and global `fetch` — zero npm dependencies, sharing the server's runtime. Its class is `ComicVineUpdater`. (The original Python updater was removed from the repo when the Node port was adopted; its history is preserved in the git log.)
 
 ## The data contract (most common source of bugs)
 
@@ -42,10 +42,9 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 - **Windows environment** (this machine): `node -e` with complex quotes breaks in PowerShell — write a temp `.js` file to the session files folder and run the file instead. `os.remove`/`fs.rmSync` on a just-closed SQLite DB fails with WinError 32 (WAL mode) — close all connections first or delete after the process exits.
 - All `*.db` files (live DB, dated snapshots, raw dumps, `-wal`/`-shm`) are gitignored and excluded from indexing — never commit or read them as text.
 - Track open work in `TODO.md` using its item IDs (SRV-n, UPD-n, DB-n, DOC-n); mark items `[x]` when done.
-- Developer decisions are journaled in the Developer Notes sections of `README.md` and `sqlite_cv_updater/README.md` (newest entry on top).
+- Developer decisions are journaled in the Developer Notes section of `README.md` (newest entry on top).
 
 ## Docs
 
-- `README.md` — server usage, endpoints, env vars, and updater sync commands
-- `sqlite_cv_updater/README.md` — documents the original Python updater (reference only); the Node updater's full flag reference lives in the `README.md` sync section and the `src/updater.js` header
+- `README.md` — server usage, endpoints, env vars, and updater sync commands; the Node updater's full flag reference lives in its sync section and the `src/updater.js` header
 - `TODO.md` — open items with IDs
