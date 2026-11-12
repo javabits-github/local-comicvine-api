@@ -37,6 +37,7 @@
  *   node src/rawapi.js [database_path]
  *   node src/rawapi.js --db /path/to/comicvine_rawapi_YYYYMMDD.db
  *   node src/rawapi.js --full --yes
+ *   node src/rawapi.js --resource issue [database_path]
  *   COMICVINE_API_KEY=your_key node src/rawapi.js --non-interactive
  *
  * npm run rawapi          — incremental sync
@@ -45,6 +46,11 @@
  * A full sync makes one detail call per entity across all eleven tables
  * (~1.5M calls). It is gated behind an interactive "yes" prompt, or the --yes
  * flag in non-interactive runs.
+ *
+ * --resource <name> restricts the run to specific resource(s) instead of all
+ * eleven — repeatable and/or comma-separated, accepting the singular (issue),
+ * the plural list name (issues), or the cv_* table name (cv_issue). Post-sync
+ * stats are reported only for the selected resources (UPD-12).
  */
 
 "use strict";
@@ -80,18 +86,50 @@ const SNAPSHOT_DATE = "2026-01-22";
 // prefix is extracted from the snapshot's api_detail_url values); `list` is
 // the plural list endpoint.
 const RESOURCES = [
-  { name: "power",     table: "cv_power",     list: "powers/",     detail: "power/4035-" },
-  { name: "concept",   table: "cv_concept",   list: "concepts/",   detail: "concept/4015-" },
-  { name: "story_arc", table: "cv_storyarc",  list: "story_arcs/", detail: "story_arc/4045-" },
-  { name: "object",    table: "cv_object",    list: "objects/",    detail: "object/4055-" },
-  { name: "publisher", table: "cv_publisher", list: "publishers/", detail: "publisher/4010-" },
-  { name: "location",  table: "cv_location",  list: "locations/",  detail: "location/4020-" },
-  { name: "team",      table: "cv_team",      list: "teams/",      detail: "team/4060-" },
-  { name: "person",    table: "cv_person",    list: "people/",     detail: "person/4040-" },
-  { name: "volume",    table: "cv_volume",    list: "volumes/",    detail: "volume/4050-" },
-  { name: "character", table: "cv_character", list: "characters/", detail: "character/4005-" },
-  { name: "issue",     table: "cv_issue",     list: "issues/",     detail: "issue/4000-" } // LAST — largest table
+  { name: "power",     table: "cv_power",     list: "powers/",     detail: "power/4035-",   aliases: ["powers", "cv_power"] },
+  { name: "concept",   table: "cv_concept",   list: "concepts/",   detail: "concept/4015-", aliases: ["concepts", "cv_concept"] },
+  { name: "story_arc", table: "cv_storyarc",  list: "story_arcs/", detail: "story_arc/4045-", aliases: ["storyarcs", "story_arcs", "storyarc", "cv_storyarc"] },
+  { name: "object",    table: "cv_object",    list: "objects/",    detail: "object/4055-",  aliases: ["objects", "cv_object"] },
+  { name: "publisher", table: "cv_publisher", list: "publishers/", detail: "publisher/4010-", aliases: ["publishers", "cv_publisher"] },
+  { name: "location",  table: "cv_location",  list: "locations/",  detail: "location/4020-", aliases: ["locations", "cv_location"] },
+  { name: "team",      table: "cv_team",      list: "teams/",      detail: "team/4060-",    aliases: ["teams", "cv_team"] },
+  { name: "person",    table: "cv_person",    list: "people/",     detail: "person/4040-",  aliases: ["people", "persons", "cv_person"] },
+  { name: "volume",    table: "cv_volume",    list: "volumes/",    detail: "volume/4050-",  aliases: ["volumes", "cv_volume"] },
+  { name: "character", table: "cv_character", list: "characters/", detail: "character/4005-", aliases: ["characters", "cv_character"] },
+  { name: "issue",     table: "cv_issue",     list: "issues/",     detail: "issue/4000-",   aliases: ["issues", "cv_issue"] } // LAST — largest table
 ];
+
+// ─── Resource name resolution (UPD-12) ───────────────────────────────────────
+
+// Resolve a user-supplied resource name (singular, plural list-endpoint name,
+// or cv_* table name) to its registry entry. Returns null for an unknown name.
+function resolveResource(input) {
+  const key = String(input).trim().toLowerCase();
+  return RESOURCES.find((r) => r.name === key || r.aliases.includes(key)) || null;
+}
+
+// Resolve a list of user-supplied names (each may itself be comma-separated)
+// to registry entries, preserving first-seen order and deduplicating. Returns
+// { resources, unknown } where `unknown` lists the names that did not resolve.
+function resolveResources(inputs) {
+  const resources = [];
+  const unknown = [];
+  const seen = new Set();
+  for (const input of inputs) {
+    for (const token of String(input).split(",").map((t) => t.trim()).filter(Boolean)) {
+      const r = resolveResource(token);
+      if (!r) {
+        unknown.push(token);
+        continue;
+      }
+      if (!seen.has(r.name)) {
+        seen.add(r.name);
+        resources.push(r);
+      }
+    }
+  }
+  return { resources, unknown };
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -122,6 +160,9 @@ class RawApiSync {
     this.verbose = options.verbose !== false;
     this.logCapture = options.logCapture || null;
     this.full = Boolean(options.full);
+    // UPD-12: restrict the run to specific resources (RESOURCES registry
+    // entries). null/undefined = all eleven.
+    this.resources = options.resources || null;
     this.fetchFn = options.fetchFn || globalThis.fetch;
     // Injectable delays (tests pass 0 to skip the real waits).
     this.apiDelayMs = options.apiDelayMs ?? API_DELAY_SECONDS * 1000;
@@ -495,14 +536,20 @@ class RawApiSync {
     this.setEndpointLastSync(resource.name, endDate);
   }
 
+  // UPD-12: the resources this run will sync, in registry order (smallest-first
+  // so issue is last). All eleven when no subset was requested.
+  selectedResources() {
+    return this.resources ? RESOURCES.filter((r) => this.resources.includes(r)) : RESOURCES;
+  }
+
   async runSync(startDate = null) {
     this.ensureTables();
 
     const endDate = todayStr();
 
     // RESOURCES is ordered smallest-first so issue (the largest table) is
-    // always synced last.
-    for (const resource of RESOURCES) {
+    // always synced last. UPD-12: a --resource subset keeps that order.
+    for (const resource of this.selectedResources()) {
       const start = startDate || this.calculateSafeStartDate(resource.name);
       const last = this.getEndpointLastSync(resource.name);
       if (last) this.log(`${resource.name} last synced: ${last}`);
@@ -524,7 +571,8 @@ class RawApiSync {
     this.log("RAW API SYNC COMPLETE", { force: true });
     this.log("=".repeat(50), { force: true });
     this.log(`API calls made: ${this.stats.api_calls}`, { force: true });
-    for (const r of RESOURCES) {
+    // UPD-12: report only the resources this run synced (all eleven by default).
+    for (const r of this.selectedResources()) {
       this.log(
         `${r.name.padEnd(12)} added: ${this.stats[`${r.name}_added`]}, ` +
         `updated: ${this.stats[`${r.name}_updated`]}, failed: ${this.stats[`${r.name}_failed`]}`,
@@ -599,10 +647,20 @@ function findLatestRawApiDatabase(dir) {
 // (~1.5M calls, dominated by the ~1.1M issues). At the ComicVine rate limit
 // (200 calls/hour, then a 1-hour ban) it takes on the order of weeks. Gate it
 // behind an explicit confirmation so it is never triggered by accident.
-async function confirmFullSync({ interactive, yes }) {
+async function confirmFullSync({ interactive, yes, resources = null }) {
   if (yes) return true;
 
-  const calls = "~1.5 million (one detail call per entity across all eleven tables)";
+  // UPD-12: scale the warning to the selected resources — a full `publisher`
+  // sync is trivial, but a full `issue` sync is still ~1.1M detail calls.
+  const scope = resources
+    ? resources.map((r) => r.name).join(", ")
+    : "all eleven tables";
+  const calls = resources
+    ? `one detail call per entity for ${scope}` +
+      (resources.some((r) => r.name === "issue")
+        ? " — the issue table alone is ~1.1M calls"
+        : "")
+    : "~1.5 million (one detail call per entity across all eleven tables)";
   const line = "=".repeat(50);
   console.error(`\n${line}`);
   console.error("FULL SYNC WARNING");
@@ -635,7 +693,8 @@ function parseArgs(argv) {
   const args = {
     dbPath: null,
     apiKey: null, startDate: null,
-    full: false, nonInteractive: false, quiet: false, yes: false
+    full: false, nonInteractive: false, quiet: false, yes: false,
+    resources: []
   };
 
   let positional = 0;
@@ -648,6 +707,15 @@ function parseArgs(argv) {
     else if (arg === "--db") args.dbPath = argv[++i];
     else if (arg === "--api-key") args.apiKey = argv[++i];
     else if (arg === "--start-date") args.startDate = argv[++i];
+    else if (arg === "--resource") {
+      // UPD-12: repeatable and/or comma-separated resource names.
+      const value = argv[++i];
+      if (value) {
+        for (const token of value.split(",").map((t) => t.trim()).filter(Boolean)) {
+          args.resources.push(token);
+        }
+      }
+    }
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -678,6 +746,12 @@ Options:
   --start-date <date>  Custom start date YYYY-MM-DD (default: automatic)
   --full               Full sync: fetch every record (no date filter)
   --yes, -y            Confirm a full sync without an interactive prompt
+  --resource <name>    Sync only the named resource(s) — repeatable and/or
+                       comma-separated. Accepts the singular (issue), the
+                       plural list name (issues), or the cv_* table name
+                       (cv_issue). Valid: power, concept, story_arc, object,
+                       publisher, location, team, person, volume, character,
+                       issue. Default: all eleven.
   --non-interactive    Run without prompts (for cron)
   --quiet              Reduce output verbosity
 
@@ -695,6 +769,21 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const interactive = !args.nonInteractive;
   const verbose = !args.quiet;
+
+  // UPD-12: resolve --resource names up front so an unknown name is rejected
+  // before any work (database discovery, API-key validation, …) is done.
+  let resources = null;
+  if (args.resources.length > 0) {
+    const resolved = resolveResources(args.resources);
+    if (resolved.unknown.length > 0) {
+      console.error(`ERROR: Unknown resource(s): ${resolved.unknown.join(", ")}`);
+      console.error(`Valid resources: ${RESOURCES.map((r) => r.name).join(", ")}`);
+      console.error("(Each may be the singular, the plural list name, or the cv_* table name;");
+      console.error("comma-separate them or repeat --resource for several.)");
+      process.exit(1);
+    }
+    resources = resolved.resources;
+  }
 
   if (interactive && verbose) {
     console.log("=".repeat(50));
@@ -734,8 +823,9 @@ async function main() {
   }
 
   // Gate an expensive full sync behind explicit confirmation.
+  // UPD-12: scale the warning to the selected resources.
   if (args.full) {
-    const confirmed = await confirmFullSync({ interactive, yes: args.yes });
+    const confirmed = await confirmFullSync({ interactive, yes: args.yes, resources });
     if (!confirmed) {
       console.error("Full sync not confirmed. Exiting without syncing.");
       process.exit(1);
@@ -754,8 +844,8 @@ async function main() {
     }
   }
 
-  // Run the sync.
-  const sync = new RawApiSync(dbPath, apiKey, { verbose, full: args.full });
+  // Run the sync (UPD-12: `resources` restricts the run to --resource).
+  const sync = new RawApiSync(dbPath, apiKey, { verbose, full: args.full, resources });
   if (!sync.connect()) {
     process.exit(1);
   }
@@ -791,6 +881,8 @@ if (require.main === module) {
 module.exports = {
   RawApiSync,
   RESOURCES,
+  resolveResource,
+  resolveResources,
   SNAPSHOT_DATE,
   validateApiKey,
   findLatestRawApiDatabase,

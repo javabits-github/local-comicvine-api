@@ -16,6 +16,7 @@
  *   node src/updater.js --non-interactive --db-dir /path/to/db
  *   node src/updater.js --full [database_path]
  *   node src/updater.js --full --yes [database_path]
+ *   node src/updater.js --resource issues [database_path]
  *   COMICVINE_API_KEY=your_key node src/updater.js --non-interactive --db-dir /path/to/db
  *
  * npm run sync          — incremental sync
@@ -24,6 +25,12 @@
  * A full sync is expensive (one call per page across all seven endpoints, i.e.
  * ~1.1M issue-detail calls). It is gated behind an interactive "yes" prompt,
  * or the --yes flag in non-interactive runs (UPD-2).
+ *
+ * --resource <name> restricts the run to specific resource(s) instead of all
+ * seven — repeatable and/or comma-separated, accepting the endpoint name, the
+ * cv_* table name, or the singular (e.g. issue / issues / cv_issue). Post-sync
+ * maintenance (volume/issue-count recalc, FTS rebuild) runs only for the
+ * selected resources (UPD-12).
  */
 
 "use strict";
@@ -44,6 +51,54 @@ const API_DELAY_SECONDS = 1.5;
 const MAX_RETRIES = 5;
 const RATE_LIMIT_STATUS = 107;
 const RATE_LIMIT_BACKOFF_SECONDS = 60;
+
+// ─── Resources (UPD-12) ──────────────────────────────────────────────────────
+//
+// The seven endpoints runSync can sync, in the order they run. `name` is the
+// endpoint (and the cv_sync_metadata key); `method` is the sync method;
+// `table` is the cv_* table; `stats` is the stats-key prefix (note: the
+// `people` endpoint reports under `persons_*`); `statsLabel` is the display
+// name in the summary; `fts` is the FTS5 index; `aliases` are the other names
+// a user may pass to --resource (singular + table name).
+const RESOURCES = [
+  { name: "publishers", method: "syncPublishers", label: "publishers",  stats: "publishers", statsLabel: "Publishers",  table: "cv_publisher", fts: "cv_publisher_fts", aliases: ["publisher", "cv_publisher"] },
+  { name: "people",     method: "syncPersons",    label: "people",      stats: "persons",    statsLabel: "Persons",     table: "cv_person",    fts: "cv_person_fts",    aliases: ["person", "persons", "cv_person"] },
+  { name: "volumes",    method: "syncVolumes",    label: "volumes",     stats: "volumes",    statsLabel: "Volumes",     table: "cv_volume",    fts: "cv_volume_fts",    aliases: ["volume", "cv_volume"] },
+  { name: "issues",     method: "syncIssues",     label: "issues",      stats: "issues",     statsLabel: "Issues",      table: "cv_issue",     fts: "cv_issue_fts",     aliases: ["issue", "cv_issue"] },
+  { name: "teams",      method: "syncTeams",      label: "teams",       stats: "teams",      statsLabel: "Teams",       table: "cv_team",      fts: "cv_team_fts",      aliases: ["team", "cv_team"] },
+  { name: "storyarcs",  method: "syncStoryarcs",  label: "story arcs",  stats: "storyarcs",  statsLabel: "Story arcs",   table: "cv_storyarc",  fts: "cv_storyarc_fts",  aliases: ["storyarc", "story_arc", "story_arcs", "cv_storyarc"] },
+  { name: "concepts",   method: "syncConcepts",   label: "concepts",    stats: "concepts",   statsLabel: "Concepts",    table: "cv_concept",   fts: "cv_concept_fts",   aliases: ["concept", "cv_concept"] }
+];
+
+// Resolve a user-supplied resource name (endpoint name, cv_* table name, or
+// singular) to its registry entry. Returns null for an unknown name.
+function resolveResource(input) {
+  const key = String(input).trim().toLowerCase();
+  return RESOURCES.find((r) => r.name === key || r.aliases.includes(key)) || null;
+}
+
+// Resolve a list of user-supplied names (each may itself be comma-separated)
+// to registry entries, preserving first-seen order and deduplicating. Returns
+// { resources, unknown } where `unknown` lists the names that did not resolve.
+function resolveResources(inputs) {
+  const resources = [];
+  const unknown = [];
+  const seen = new Set();
+  for (const input of inputs) {
+    for (const token of String(input).split(",").map((t) => t.trim()).filter(Boolean)) {
+      const r = resolveResource(token);
+      if (!r) {
+        unknown.push(token);
+        continue;
+      }
+      if (!seen.has(r.name)) {
+        seen.add(r.name);
+        resources.push(r);
+      }
+    }
+  }
+  return { resources, unknown };
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -116,6 +171,9 @@ class ComicVineUpdater {
     this.verbose = options.verbose !== false;
     this.logCapture = options.logCapture || null;
     this.full = Boolean(options.full);
+    // UPD-12: restrict the run to specific resources (RESOURCES registry
+    // entries). null/undefined = all seven.
+    this.resources = options.resources || null;
     this.fetchFn = options.fetchFn || globalThis.fetch;
     // Injectable delays (tests pass 0 to skip the real waits).
     this.apiDelayMs = options.apiDelayMs ?? API_DELAY_SECONDS * 1000;
@@ -469,15 +527,9 @@ class ComicVineUpdater {
   // the trigram tokenizer is case-insensitive and matches substrings, which is
   // the same semantics the server's legacy LIKE matching used (SRV-5).
   get FTS_RESOURCES() {
-    return [
-      { table: "cv_publisher", fts: "cv_publisher_fts" },
-      { table: "cv_person", fts: "cv_person_fts" },
-      { table: "cv_volume", fts: "cv_volume_fts" },
-      { table: "cv_issue", fts: "cv_issue_fts" },
-      { table: "cv_team", fts: "cv_team_fts" },
-      { table: "cv_storyarc", fts: "cv_storyarc_fts" },
-      { table: "cv_concept", fts: "cv_concept_fts" }
-    ];
+    // Derived from the RESOURCES registry (UPD-12) so the FTS indexes and the
+    // sync endpoints stay in lockstep (same seven tables, same order).
+    return RESOURCES.map((r) => ({ table: r.table, fts: r.fts }));
   }
 
   // Create the per-resource FTS5 trigram tables (external-content, keyed on the
@@ -1451,12 +1503,17 @@ class ComicVineUpdater {
     }
   }
 
-  rebuildFtsIndex() {
+  rebuildFtsIndex(tables = null) {
     this.log("\n--- Rebuilding Search Index ---");
     if (!this.conn) return;
 
     // SRV-5: rebuild every per-resource FTS5 trigram index from the base tables.
-    for (const { fts } of this.FTS_RESOURCES) {
+    // UPD-12: when `tables` is given, rebuild only those (a scoped --resource
+    // run touches only the selected resources' indexes).
+    const targets = tables
+      ? this.FTS_RESOURCES.filter(({ fts }) => tables.includes(fts))
+      : this.FTS_RESOURCES;
+    for (const { fts } of targets) {
       try {
         const exists = this.conn.prepare(
           "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
@@ -1470,17 +1527,21 @@ class ComicVineUpdater {
       }
     }
 
-    // Legacy raw-dump index (out of scope for the API, but kept in sync).
-    try {
-      const row = this.conn.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='volume_fts'"
-      ).get();
-      if (row) {
-        this.conn.exec("INSERT INTO volume_fts(volume_fts) VALUES('rebuild')");
-        this.log("  volume_fts rebuilt");
+    // Legacy raw-dump index (out of scope for the API, but kept in sync). It
+    // indexes cv_volume, so rebuild it only when volumes was in the selection.
+    const rebuildLegacy = !tables || tables.includes("cv_volume_fts");
+    if (rebuildLegacy) {
+      try {
+        const row = this.conn.prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='volume_fts'"
+        ).get();
+        if (row) {
+          this.conn.exec("INSERT INTO volume_fts(volume_fts) VALUES('rebuild')");
+          this.log("  volume_fts rebuilt");
+        }
+      } catch (e) {
+        this.log(`  Warning: Could not rebuild volume_fts: ${e.message}`);
       }
-    } catch (e) {
-      this.log(`  Warning: Could not rebuild volume_fts: ${e.message}`);
     }
   }
 
@@ -1490,20 +1551,20 @@ class ComicVineUpdater {
     this.log("SYNC COMPLETE", { force: true });
     this.log("=".repeat(50), { force: true });
     this.log(`API calls made:     ${s.api_calls}`, { force: true });
-    this.log(`Publishers added:   ${s.publishers_added}`, { force: true });
-    this.log(`Publishers updated: ${s.publishers_updated}`, { force: true });
-    this.log(`Persons added:      ${s.persons_added}`, { force: true });
-    this.log(`Persons updated:    ${s.persons_updated}`, { force: true });
-    this.log(`Volumes added:      ${s.volumes_added}`, { force: true });
-    this.log(`Volumes updated:    ${s.volumes_updated}`, { force: true });
-    this.log(`Issues added:       ${s.issues_added}`, { force: true });
-    this.log(`Issues updated:     ${s.issues_updated}`, { force: true });
-    this.log(`Teams added:        ${s.teams_added}`, { force: true });
-    this.log(`Teams updated:      ${s.teams_updated}`, { force: true });
-    this.log(`Story arcs added:   ${s.storyarcs_added}`, { force: true });
-    this.log(`Story arcs updated: ${s.storyarcs_updated}`, { force: true });
-    this.log(`Concepts added:     ${s.concepts_added}`, { force: true });
-    this.log(`Concepts updated:   ${s.concepts_updated}`, { force: true });
+    // UPD-12: report only the resources this run synced (all seven by default).
+    // Labels are padded to a fixed width so the counts stay column-aligned.
+    for (const r of this.selectedResources()) {
+      const added = `${r.statsLabel} added:`.padEnd(20) + s[`${r.stats}_added`];
+      const updated = `${r.statsLabel} updated:`.padEnd(20) + s[`${r.stats}_updated`];
+      this.log(added, { force: true });
+      this.log(updated, { force: true });
+    }
+  }
+
+  // UPD-12: the resources this run will sync, in registry order. All seven
+  // when no subset was requested (this.resources is null).
+  selectedResources() {
+    return this.resources ? RESOURCES.filter((r) => this.resources.includes(r)) : RESOURCES;
   }
 
   async runSync(startDate = null) {
@@ -1514,15 +1575,7 @@ class ComicVineUpdater {
 
     const endDate = todayStr();
 
-    const endpoints = [
-      { name: "publishers", method: "syncPublishers", label: "publishers" },
-      { name: "people", method: "syncPersons", label: "people" },
-      { name: "volumes", method: "syncVolumes", label: "volumes" },
-      { name: "issues", method: "syncIssues", label: "issues" },
-      { name: "teams", method: "syncTeams", label: "teams" },
-      { name: "storyarcs", method: "syncStoryarcs", label: "story arcs" },
-      { name: "concepts", method: "syncConcepts", label: "concepts" }
-    ];
+    const endpoints = this.selectedResources();
 
     for (const ep of endpoints) {
       const start = startDate || this.calculateSafeStartDate(ep.name);
@@ -1536,8 +1589,14 @@ class ComicVineUpdater {
       }
     }
 
-    this.recalculateVolumeIssueCounts();
-    this.rebuildFtsIndex();
+    // UPD-12: post-sync maintenance runs only when a relevant resource was in
+    // the selection — the volume/issue-count recalc needs volumes or issues,
+    // and the FTS rebuild is scoped to the selected resources' indexes.
+    const names = new Set(endpoints.map((r) => r.name));
+    if (names.has("volumes") || names.has("issues")) {
+      this.recalculateVolumeIssueCounts();
+    }
+    this.rebuildFtsIndex(endpoints.map((r) => r.fts));
     this.printStats();
 
     return true;
@@ -1704,10 +1763,20 @@ function cleanupOldDatabases(dbDir, keepDays = 7, verbose = true) {
 // pass cannot be parallelized and takes on the order of weeks of continuous
 // calls to complete. Gate it behind an explicit confirmation so it is never
 // triggered by accident (e.g. a stray `npm run sync:full` in cron).
-async function confirmFullSync({ interactive, yes }) {
+async function confirmFullSync({ interactive, yes, resources = null }) {
   if (yes) return true;
 
-  const calls = "~1.1 million (one per issue detail, plus per-page calls for the other five endpoints)";
+  // UPD-12: scale the warning to the selected resources — a full `publishers`
+  // sync is trivial, but a full `issues` sync is still ~1.1M detail calls.
+  const scope = resources
+    ? resources.map((r) => r.label).join(", ")
+    : "all seven endpoints";
+  const calls = resources
+    ? `one unfiltered call per page for ${scope}` +
+      (resources.some((r) => r.name === "issues")
+        ? " — the issues endpoint alone is ~1.1M detail calls"
+        : "")
+    : "~1.1 million (one per issue detail, plus per-page calls for the other five endpoints)";
   const line = "=".repeat(50);
   console.error(`\n${line}`);
   console.error("FULL SYNC WARNING");
@@ -1741,7 +1810,8 @@ function parseArgs(argv) {
     database: null, dbPath: null, dbDir: null,
     apiKey: null, startDate: null,
     full: false, nonInteractive: false, quiet: false,
-    noCopy: false, keepDays: 7, yes: false
+    noCopy: false, keepDays: 7, yes: false,
+    resources: []
   };
 
   let positional = 0;
@@ -1757,6 +1827,15 @@ function parseArgs(argv) {
     else if (arg === "--api-key") args.apiKey = argv[++i];
     else if (arg === "--start-date") args.startDate = argv[++i];
     else if (arg === "--keep-days") args.keepDays = parseInt(argv[++i], 10);
+    else if (arg === "--resource") {
+      // UPD-12: repeatable and/or comma-separated resource names.
+      const value = argv[++i];
+      if (value) {
+        for (const token of value.split(",").map((t) => t.trim()).filter(Boolean)) {
+          args.resources.push(token);
+        }
+      }
+    }
     else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -1784,6 +1863,12 @@ Options:
   --start-date <date>  Custom start date YYYY-MM-DD (default: automatic)
   --full               Full sync: fetch every record (no date filter)
   --yes, -y            Confirm a full sync without an interactive prompt
+  --resource <name>    Sync only the named resource(s) — repeatable and/or
+                       comma-separated. Accepts the endpoint name, the cv_*
+                       table name, or the singular (e.g. issue / issues /
+                       cv_issue all mean issues). Valid: publishers, people,
+                       volumes, issues, teams, storyarcs, concepts.
+                       Default: all seven.
   --non-interactive    Run without prompts (for cron)
   --quiet              Reduce output verbosity
   --no-copy            Don't create dated copy, update in place
@@ -1800,6 +1885,21 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const interactive = !args.nonInteractive;
   const verbose = !args.quiet;
+
+  // UPD-12: resolve --resource names up front so an unknown name is rejected
+  // before any work (database discovery, API-key validation, …) is done.
+  let resources = null;
+  if (args.resources.length > 0) {
+    const resolved = resolveResources(args.resources);
+    if (resolved.unknown.length > 0) {
+      console.error(`ERROR: Unknown resource(s): ${resolved.unknown.join(", ")}`);
+      console.error(`Valid resources: ${RESOURCES.map((r) => r.name).join(", ")}`);
+      console.error("(Each may be the endpoint name, the cv_* table name, or the singular;");
+      console.error("comma-separate them or repeat --resource for several.)");
+      process.exit(1);
+    }
+    resources = resolved.resources;
+  }
 
   const today = todayStr();
 
@@ -1888,8 +1988,9 @@ async function main() {
   }
 
   // UPD-2: gate an expensive full sync behind explicit confirmation.
+  // UPD-12: scale the warning to the selected resources.
   if (args.full) {
-    const confirmed = await confirmFullSync({ interactive, yes: args.yes });
+    const confirmed = await confirmFullSync({ interactive, yes: args.yes, resources });
     if (!confirmed) {
       console.error("Full sync not confirmed. Exiting without syncing.");
       process.exit(1);
@@ -1908,8 +2009,8 @@ async function main() {
     }
   }
 
-  // Run the updater
-  const updater = new ComicVineUpdater(dbPath, apiKey, { verbose, full: args.full });
+  // Run the updater (UPD-12: `resources` restricts the run to --resource).
+  const updater = new ComicVineUpdater(dbPath, apiKey, { verbose, full: args.full, resources });
   if (!updater.connect()) {
     process.exit(1);
   }
@@ -1954,6 +2055,9 @@ if (require.main === module) {
 
 module.exports = {
   ComicVineUpdater,
+  RESOURCES,
+  resolveResource,
+  resolveResources,
   validateApiKey,
   findLatestDatabase,
   createTodaysDatabase,

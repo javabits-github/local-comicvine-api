@@ -88,6 +88,15 @@ npm sync          # incremental sync (since the last sync date)
 npm sync:full     # one-time full refresh (no date filter; thousands of live API calls)
 ```
 
+To sync a specific resource instead of all seven endpoints, pass `--resource <name>` (repeat it, or comma-separate several names):
+
+```powershell
+npm sync -- --resource issues
+npm sync -- --resource issues,volumes   # or: --resource issues --resource volumes
+```
+
+Each name may be the endpoint name (`issues`), the `cv_*` table name (`cv_issue`), or the singular (`issue`). Valid names: `publishers`, `people`, `volumes`, `issues`, `teams`, `storyarcs`, `concepts` — an unknown name is rejected up front with the valid list. `cv_sync_metadata` advances only for the synced resources (the rest keep their old start dates), and the post-sync maintenance — the volume/issue-count recalculation and the FTS index rebuilds — runs only for the resources in the selection.
+
 A full sync is expensive (one unfiltered call per page across all seven endpoints ≈ ~1.1M issue-detail calls; at the 200-calls/hour rate limit it runs for weeks and cannot be parallelized), so it is gated behind a confirmation. In an interactive run the updater prints a warning and asks you to type `yes`; in a non-interactive run it aborts unless you confirm explicitly:
 
 ```powershell
@@ -106,6 +115,15 @@ The rawapi database (`comicvine_rawapi_*.db`, gitignored) holds eleven `cv_*` ta
 npm run rawapi          # incremental sync (since the last sync date)
 npm run rawapi:full     # one-time full refresh (~1.5M live API calls)
 ```
+
+To sync a specific table instead of all eleven, pass `--resource <name>` (repeat it, or comma-separate several names):
+
+```powershell
+npm run rawapi -- --resource issue
+npm run rawapi -- --resource publisher,issue
+```
+
+Each name may be the singular (`issue`), the plural (`issues`), or the `cv_*` table name (`cv_issue`). Valid names: `power`, `concept`, `story_arc`, `object`, `publisher`, `location`, `team`, `person`, `volume`, `character`, `issue` — an unknown name is rejected up front with the valid list. The selected resources keep the smallest-first order, so `issue` still syncs last when it is in the selection, and `cv_sync_metadata` advances only for the synced tables.
 
 A full sync makes one detail call per entity across all eleven tables (~1.5M calls, dominated by the ~1.1M issues), so it is gated behind the same confirmation as the updater:
 
@@ -148,6 +166,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-11-11 — `--resource`: sync a specific resource instead of all endpoints (UPD-12)
+
+- **Context:** `npm run sync` always ran all seven endpoints and `npm run rawapi` all eleven tables, so refreshing a single table — or a targeted pass like UPD-7's id-window backfill — required a run across everything.
+- **Change:** both processes now accept `--resource <name>` (repeatable and/or comma-separated). Each has a `RESOURCES` registry plus `resolveResource`/`resolveResources` that accept the endpoint name, the `cv_*` table name, or the singular — updater: `issue`/`issues`/`cv_issue`, `person`/`persons`/`cv_person`→`people`, `story_arc`/`story_arcs`/`storyarc`/`cv_storyarc`→`storyarcs`; rawapi keeps its singular names (`power`, `concept`, `story_arc`, …, `issue`) with the plural and table name as aliases. An unknown name is rejected up front with the valid list, before any work (database discovery, API-key validation, …). `runSync` syncs only the selected resources (registry order preserved, so rawapi still does `issue` last), `cv_sync_metadata` advances only for them, and `printStats` reports only them. The `--full` confirmation (UPD-2) scales its warning to the selection — a full `publishers` sync is trivial, a full `issues` sync is still ~1.1M calls — and the updater's post-sync maintenance is gated: `recalculateVolumeIssueCounts` runs only when volumes or issues were selected, and `rebuildFtsIndex` rebuilds only the selected resources' FTS indexes (the legacy `volume_fts` only when `cv_volume_fts` is in the selection). `--start-date` already scoped per endpoint and works unchanged. New tests in [test/updater.test.js](test/updater.test.js) and [test/rawapi.test.js](test/rawapi.test.js) cover name resolution (singular/plural/table/aliases, comma split, dedupe, unknown), runSync filtering (only the selected endpoints are called; the other tables stay empty), the maintenance gating, and the `confirmFullSync` subset contract; full suite 90/90 green.
+- **Gotcha / follow-up:** the updater's `people` endpoint reports its stats under `persons_*` (a pre-existing quirk the registry preserves via a `stats` key distinct from `name`), so the registry carries both. UPD-7's id-window backfill is still open: `--resource issues` narrows the run to the issues endpoint but cannot restrict it to an id window — that needs a `--id-window` (or similar) flag.
 
 #### 2026-11-11 — Raw API sync process (RAW-1)
 

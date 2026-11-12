@@ -10,7 +10,9 @@ const {
   RESOURCES,
   SNAPSHOT_DATE,
   confirmFullSync,
-  findLatestRawApiDatabase
+  findLatestRawApiDatabase,
+  resolveResource,
+  resolveResources
 } = require("../src/rawapi.js");
 
 // ─── Test fixtures ───────────────────────────────────────────────────────────
@@ -330,4 +332,84 @@ test("confirmFullSync returns true when --yes is passed without prompting", asyn
 
 test("confirmFullSync refuses a non-interactive full sync without --yes", async () => {
   assert.equal(await confirmFullSync({ interactive: false, yes: false }), false);
+});
+
+// ─── --resource filtering (UPD-12) ──────────────────────────────────────────
+
+test("resolveResource accepts the singular, plural, and table name", () => {
+  const bySingular = resolveResource("issue");
+  const byPlural = resolveResource("issues");
+  const byTable = resolveResource("cv_issue");
+  assert.equal(bySingular.name, "issue");
+  assert.equal(byPlural, bySingular, "plural resolves to the same entry");
+  assert.equal(byTable, bySingular, "table name resolves to the same entry");
+});
+
+test("resolveResource maps the person and story-arc spellings", () => {
+  assert.equal(resolveResource("person").name, "person");
+  assert.equal(resolveResource("people").name, "person");
+  assert.equal(resolveResource("persons").name, "person");
+  assert.equal(resolveResource("story_arc").name, "story_arc");
+  assert.equal(resolveResource("story_arcs").name, "story_arc");
+  assert.equal(resolveResource("storyarcs").name, "story_arc");
+});
+
+test("resolveResource returns null for an unknown name", () => {
+  assert.equal(resolveResource("nope"), null);
+  assert.equal(resolveResource("cv_nope"), null);
+});
+
+test("resolveResources splits commas, dedupes, and collects unknowns", () => {
+  const { resources, unknown } = resolveResources(["issue, cv_issue", "issues", "bogus"]);
+  // issue / cv_issue / issues all name the same "issue" entry → deduped to one.
+  assert.equal(resources.length, 1);
+  assert.equal(resources[0].name, "issue");
+  assert.deepEqual(unknown, ["bogus"]);
+});
+
+// ─── runSync: table filtering ───────────────────────────────────────────────
+
+test("runSync with resources:[publisher] only syncs the publisher table", async () => {
+  const { dir, dbPath } = makeEmptyDb();
+  try {
+    const { fn, calls } = makeMockFetch();
+    const publisher = RESOURCES.find((r) => r.name === "publisher");
+    const sync = new RawApiSync(dbPath, "test-key", {
+      verbose: false, full: false, fetchFn: fn, apiDelayMs: 0,
+      resources: [publisher]
+    });
+    assert.ok(sync.connect());
+    await sync.runSync("2026-01-01");
+    sync.close();
+
+    // Only the publisher list + detail calls were made (in that order).
+    assert.deepEqual(calls, ["/api/publishers/", "/api/publisher/4010-5/"]);
+
+    const db = new DatabaseSync(dbPath);
+    // The publisher row was stored verbatim.
+    const pub = db.prepare("SELECT * FROM cv_publisher WHERE id=5").get();
+    assert.ok(pub, "publisher row should exist");
+    assert.equal(pub.raw_api_response, JSON.stringify(makeEntity("publisher", 5)));
+    // Every other table is empty.
+    for (const r of RESOURCES) {
+      if (r.name === "publisher") continue;
+      assert.equal(db.prepare(`SELECT COUNT(*) c FROM ${r.table}`).get().c, 0, `${r.table} should be empty`);
+    }
+    // Only the publisher endpoint got a metadata row.
+    const metaCount = db.prepare("SELECT COUNT(*) c FROM cv_sync_metadata").get().c;
+    assert.equal(metaCount, 1);
+    db.close();
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
+// ─── confirmFullSync: resource scaling ──────────────────────────────────────
+
+test("confirmFullSync accepts a resource subset and keeps the yes/no contract", async () => {
+  const publisher = RESOURCES.find((r) => r.name === "publisher");
+  // Non-interactive + no --yes → refuses, even with a (cheap-looking) subset.
+  assert.equal(await confirmFullSync({ interactive: false, yes: false, resources: [publisher] }), false);
+  // --yes → confirms.
+  assert.equal(await confirmFullSync({ interactive: false, yes: true, resources: [publisher] }), true);
 });

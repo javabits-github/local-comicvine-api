@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
-const { ComicVineUpdater, confirmFullSync, jsonify } = require("../src/updater.js");
+const { ComicVineUpdater, confirmFullSync, jsonify, resolveResource, resolveResources } = require("../src/updater.js");
 
 const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-test-"));
 const databasePath = path.join(directory, "test.db");
@@ -440,4 +440,136 @@ test("issue FK failure with unfetchable volume is skipped, not fatal", async () 
   } finally {
     cleanupTempDir(dir);
   }
+});
+
+// ─── --resource filtering (UPD-12) ──────────────────────────────────────────
+
+// A full-schema DB (all seven base tables + metadata) for isolated runSync
+// filtering tests. cv_volume deliberately omits the legacy _credits / first /
+// last columns so ensureVolumeCreditTables' migration is a no-op. The FTS
+// tables are created by ensureFtsTables during runSync.
+function makeFullDb() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-res-test-"));
+  const dbPath = path.join(dir, "res.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, image_url TEXT, site_detail_url TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, location_address TEXT, location_city TEXT, location_state TEXT, characters TEXT, story_arcs TEXT, teams TEXT, volumes TEXT);
+    CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT, birth TEXT, country TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, image_url TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, created_characters TEXT, issue_credits TEXT, story_arc_credits TEXT, volume_credits TEXT, site_detail_url TEXT, count_of_issue_appearances INTEGER);
+    CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT);
+    CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, object_credits TEXT, concept_credits TEXT, character_died_in TEXT, team_disbanded_in TEXT, first_appearance_characters TEXT, first_appearance_concepts TEXT, first_appearance_locations TEXT, first_appearance_objects TEXT, first_appearance_storyarcs TEXT, first_appearance_teams TEXT, has_staff_review INTEGER);
+    CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_team_members INTEGER, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT);
+    CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, issues TEXT, movies TEXT);
+    CREATE TABLE cv_concept (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, count_of_issue_appearances INTEGER, start_year TEXT);
+    CREATE TABLE cv_sync_metadata (endpoint TEXT PRIMARY KEY, last_sync_date TEXT NOT NULL, last_sync_timestamp TEXT NOT NULL, resume_state TEXT);
+  `);
+  db.close();
+  return { dir, dbPath };
+}
+
+// ─── resolveResource / resolveResources ─────────────────────────────────────
+
+test("resolveResource accepts the endpoint name, table name, and singular", () => {
+  const byEndpoint = resolveResource("issues");
+  const bySingular = resolveResource("issue");
+  const byTable = resolveResource("cv_issue");
+  assert.equal(byEndpoint.name, "issues");
+  assert.equal(bySingular, byEndpoint, "singular resolves to the same entry");
+  assert.equal(byTable, byEndpoint, "table name resolves to the same entry");
+});
+
+test("resolveResource maps person→people and the story-arc spellings→storyarcs", () => {
+  assert.equal(resolveResource("person").name, "people");
+  assert.equal(resolveResource("cv_person").name, "people");
+  assert.equal(resolveResource("story_arc").name, "storyarcs");
+  assert.equal(resolveResource("story_arcs").name, "storyarcs");
+  assert.equal(resolveResource("storyarc").name, "storyarcs");
+});
+
+test("resolveResource returns null for an unknown name", () => {
+  assert.equal(resolveResource("nope"), null);
+  assert.equal(resolveResource("cv_nope"), null);
+});
+
+test("resolveResources splits commas, dedupes, and collects unknowns", () => {
+  const { resources, unknown } = resolveResources(["issue, cv_issue", "issues", "bogus"]);
+  // issue / cv_issue / issues all name the same "issues" entry → deduped to one.
+  assert.equal(resources.length, 1);
+  assert.equal(resources[0].name, "issues");
+  assert.deepEqual(unknown, ["bogus"]);
+});
+
+// ─── runSync: endpoint filtering ────────────────────────────────────────────
+
+test("runSync with resources:[issues] only calls the issues endpoints", async () => {
+  const { dir, dbPath } = makeFullDb();
+  try {
+    const { fn, calls } = makeMockFetch();
+    const updater = new ComicVineUpdater(dbPath, "test-key", {
+      verbose: false, full: false, fetchFn: fn, apiDelayMs: 0,
+      resources: [resolveResource("issues")]
+    });
+    assert.ok(updater.connect());
+    await updater.runSync("2026-01-01");
+    updater.close();
+
+    const pathnames = calls.map((u) => new URL(u).pathname);
+    // The issues list + per-issue detail calls were made.
+    assert.ok(pathnames.some((p) => p.includes("/issues/")), "issues list was called");
+    assert.ok(pathnames.some((p) => p.includes("/issue/4000-")), "issue details were fetched");
+    // None of the other six endpoints were touched.
+    for (const other of ["/publishers/", "/people/", "/volumes/", "/teams/", "/story_arcs/", "/concepts/"]) {
+      assert.ok(!pathnames.some((p) => p.includes(other)), `should not have called ${other}`);
+    }
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
+// ─── runSync: post-sync maintenance gating ──────────────────────────────────
+
+test("post-sync maintenance is scoped to the selected resources", async () => {
+  const { dir, dbPath } = makeFullDb();
+  try {
+    const { fn } = makeMockFetch();
+
+    // publishers only: no volume/issue-count recalc; only the publisher FTS
+    // index is rebuilt.
+    let lines = [];
+    let updater = new ComicVineUpdater(dbPath, "test-key", {
+      verbose: false, full: false, fetchFn: fn, apiDelayMs: 0,
+      resources: [resolveResource("publishers")],
+      logCapture: { write: (m) => lines.push(m) }
+    });
+    assert.ok(updater.connect());
+    await updater.runSync("2026-01-01");
+    updater.close();
+    assert.ok(!lines.some((l) => l.includes("Recalculating Volume Issue Counts")), "no recalc for a publishers-only run");
+    assert.ok(lines.some((l) => l.includes("cv_publisher_fts rebuilt")), "publisher FTS index rebuilt");
+    assert.ok(!lines.some((l) => l.includes("cv_issue_fts rebuilt")), "issue FTS index not rebuilt");
+
+    // issues: the recalc runs and the issue FTS index is rebuilt.
+    lines = [];
+    updater = new ComicVineUpdater(dbPath, "test-key", {
+      verbose: false, full: false, fetchFn: fn, apiDelayMs: 0,
+      resources: [resolveResource("issues")],
+      logCapture: { write: (m) => lines.push(m) }
+    });
+    assert.ok(updater.connect());
+    await updater.runSync("2026-01-01");
+    updater.close();
+    assert.ok(lines.some((l) => l.includes("Recalculating Volume Issue Counts")), "recalc runs for an issues run");
+    assert.ok(lines.some((l) => l.includes("cv_issue_fts rebuilt")), "issue FTS index rebuilt");
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
+// ─── confirmFullSync: resource scaling ──────────────────────────────────────
+
+test("confirmFullSync accepts a resource subset and keeps the yes/no contract", async () => {
+  const issues = resolveResource("issues");
+  // Non-interactive + no --yes → refuses, even with a (cheap-looking) subset.
+  assert.equal(await confirmFullSync({ interactive: false, yes: false, resources: [issues] }), false);
+  // --yes → confirms.
+  assert.equal(await confirmFullSync({ interactive: false, yes: true, resources: [issues] }), true);
 });
