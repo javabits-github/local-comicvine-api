@@ -19,6 +19,8 @@ database.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER,
 database.exec("CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_team_members INTEGER, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT)");
 database.exec("CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, count_of_issue_appearances INTEGER, date_added TEXT, first_appeared_in_issue TEXT, publisher TEXT, site_detail_url TEXT, issues TEXT, movies TEXT)");
 database.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT, birth TEXT, count_of_issue_appearances INTEGER, country TEXT, date_added TEXT, date_last_updated TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, image_url TEXT, created_characters TEXT, issue_credits TEXT, story_arc_credits TEXT, volume_credits TEXT, site_detail_url TEXT)");
+// UPD-13: no api_detail_url column — the server derives it from the id (like team).
+database.exec("CREATE TABLE cv_concept (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, count_of_issue_appearances INTEGER, start_year TEXT)");
 database.prepare("INSERT INTO cv_publisher (id, name, site_detail_url, aliases, date_added, location_address, location_city, location_state, characters, story_arcs, teams, volumes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run(4, "Dell", "https://example.test/dell/", "Dell Comics", "2020-04-15 10:00:00", "750 Third Avenue", "New York", "NY", J([{ id: 17, name: "Daredevil" }]), J([]), J([]), J([]));
 database.prepare("INSERT INTO cv_publisher (id, name, site_detail_url, aliases, date_added) VALUES (?, ?, ?, ?, ?)")
@@ -43,6 +45,8 @@ database.prepare("INSERT INTO cv_person (id, name, aliases, api_detail_url, birt
     .run(1251, "Barry Kitson", "Barry Kitson (artist)", "https://comicvine.gamespot.com/api/person/4040-1251/", null, 180, "United Kingdom", "2020-04-15 10:00:00", "2021-05-01 08:30:00", null, "1", "Leicester", "barry@example.test", "https://example.test/barry", "https://example.test/barry.jpg", J([{ id: 9081, name: "The Amazing Bug" }]), J([]), J([]), J([{ id: 120, name: "Sample Volume" }]), "https://example.test/barry-kitson/");
 database.prepare("INSERT INTO cv_person (id, name, date_added) VALUES (?, ?, ?)")
     .run(1252, "Alex Ross", "1899-01-01 00:00:00");
+database.prepare("INSERT INTO cv_concept (id, name, aliases, deck, description, date_added, date_last_updated, image_url, site_detail_url, first_appeared_in_issue, count_of_issue_appearances, start_year) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(58852, "Digital Comic", "DC", "A digital comic", "A digital comic description", "2020-01-01 00:00:00", "2026-01-01 00:00:00", "https://example.test/digital-comic.jpg", "https://example.test/digital-comic/", J({ id: 4001, name: "Test Series #1" }), 9, "2005");
 database.close();
 
 const requestLogs = [];
@@ -524,6 +528,24 @@ test("derives publisher api_detail_url from the id (SRV-21)", async () => {
     id: 4,
     name: "Dell",
     api_detail_url: "https://comicvine.gamespot.com/api/publisher/4010-4/"
+  });
+});
+
+test("derives concept api_detail_url from the id (UPD-13)", async () => {
+  const response = await fetch(`${baseUrl}/api/concept/4015-58852/?format=json`);
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  // The live API always emits api_detail_url; the server derives it from the id
+  // (canonical base URL + domain prefix 4015 + id) — the table has no such column.
+  assert.equal(body.results.api_detail_url, "https://comicvine.gamespot.com/api/concept/4015-58852/");
+  assert.equal(body.results.name, "Digital Comic");
+
+  const projected = await fetch(`${baseUrl}/api/concept/4015-58852/?format=json&field_list=id,name,api_detail_url`);
+  const projectedBody = await projected.json();
+  assert.deepEqual(projectedBody.results, {
+    id: 58852,
+    name: "Digital Comic",
+    api_detail_url: "https://comicvine.gamespot.com/api/concept/4015-58852/"
   });
 });
 

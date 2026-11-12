@@ -231,6 +231,10 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.equal(concept.image_url, "https://example.com/concept.png");
   const conceptFirstAppeared = JSON.parse(concept.first_appeared_in_issue);
   assert.equal(conceptFirstAppeared.id, 4001);
+  // UPD-13: runSync's migration drops the api_detail_url column the server now
+  // derives from the id (the fixture created it; the live value is canonical).
+  const conceptCols = db.prepare("PRAGMA table_info(cv_concept)").all().map((c) => c.name);
+  assert.ok(!conceptCols.includes("api_detail_url"), `api_detail_url should be dropped, got ${conceptCols.join(", ")}`);
 
   // Metadata
   const meta = db.prepare("SELECT * FROM cv_sync_metadata WHERE endpoint='publishers'").get();

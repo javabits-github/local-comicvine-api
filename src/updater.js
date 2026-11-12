@@ -324,12 +324,24 @@ class ComicVineUpdater {
     `);
     this.conn.exec(`
       CREATE TABLE IF NOT EXISTS cv_concept (
-        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT,
+        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT,
         deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
         image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT,
         count_of_issue_appearances INTEGER, start_year TEXT
       )
     `);
+    // UPD-13: drop the api_detail_url column the server now derives from the id
+    // (buildApiDetailUrl). The live value equals the canonical form for every row,
+    // so the stored copy is redundant. Idempotent: no-op on a fresh table.
+    const conceptCols = this.conn.prepare("PRAGMA table_info(cv_concept)").all().map((c) => c.name);
+    if (conceptCols.includes("api_detail_url")) {
+      this.log("  Dropping cv_concept.api_detail_url (now derived from the id)...");
+      try {
+        this.conn.exec("ALTER TABLE cv_concept DROP COLUMN api_detail_url");
+      } catch (e) {
+        this.log(`  Warning: Could not drop cv_concept.api_detail_url: ${e.message}`);
+      }
+    }
     // Seed last_sync_date for new endpoints at the raw-dump snapshot date.
     const snapshot = "2026-01-22";
     const timestamp = new Date().toISOString();
@@ -1388,7 +1400,7 @@ class ComicVineUpdater {
 
     while (true) {
       const params = {
-        field_list: "id,name,aliases,api_detail_url,count_of_isssue_appearances," +
+        field_list: "id,name,aliases,count_of_isssue_appearances," +
           "deck,description,date_added,date_last_updated,image," +
           "site_detail_url,first_appeared_in_issue,start_year",
         offset, limit
@@ -1419,14 +1431,13 @@ class ComicVineUpdater {
 
         this.conn.prepare(`
           INSERT INTO cv_concept
-            (id, name, aliases, api_detail_url, deck, description,
+            (id, name, aliases, deck, description,
              date_added, date_last_updated, image_url, site_detail_url,
              first_appeared_in_issue, count_of_issue_appearances, start_year)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             aliases = excluded.aliases,
-            api_detail_url = excluded.api_detail_url,
             deck = excluded.deck,
             description = excluded.description,
             date_added = excluded.date_added,
@@ -1438,7 +1449,6 @@ class ComicVineUpdater {
             start_year = excluded.start_year
         `).run(
           conceptId, jsonify(concept.name), jsonify(concept.aliases),
-          concept.api_detail_url,
           jsonify(concept.deck), jsonify(concept.description),
           jsonify(concept.date_added), jsonify(concept.date_last_updated),
           imageUrl, concept.site_detail_url, firstAppeared,

@@ -167,6 +167,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 
 ### Diary
 
+#### 2026-11-12 — Concept `api_detail_url` is derived, not stored (UPD-13)
+
+- **Context:** the concept branch of `buildResult` read `api_detail_url` from a stored `cv_concept` column, but the value is fully determined by the id — the same redundancy SRV-21 (publisher) and SRV-22 (team) already removed by deriving it via the shared `buildApiDetailUrl` helper.
+- **Change:** the concept branch now emits `api_detail_url` **derived** from the id via `buildApiDetailUrl("concept", row.id)` (canonical base URL + domain prefix 4015 + id) instead of reading the column, matching the publisher/team pattern. The updater no longer requests or stores it: `api_detail_url` is removed from the concepts `field_list` and the `syncConcepts` upsert, and `ensureResourceTables` drops the column with an `ALTER TABLE cv_concept DROP COLUMN api_detail_url` migration (also removed from the `CREATE TABLE`, so fresh databases never get it). Safe to drop: an audit of `localcv.db` confirmed all 1,275 stored `cv_concept.api_detail_url` values (0 NULLs) equal the canonical `https://comicvine.gamespot.com/api/concept/4015-<id>/`, so the derivation is lossless for every row (UPD-11's one-table-at-a-time rule). New tests: "derives concept api_detail_url from the id (UPD-13)" (detail + `field_list` projection) and an assertion in the updater sync test that the migration drops the column; full suite 91/91 green.
+- **Gotcha / follow-up:** completes the `cv_concept` piece of UPD-11. The remaining `api_detail_url` columns (`cv_publisher`, `cv_issue`, `cv_volume`, `cv_person`, and the denormalized `cv_issue.volume_api_detail_url`) stay open under UPD-11.
+
 #### 2026-11-11 — `--resource`: sync a specific resource instead of all endpoints (UPD-12)
 
 - **Context:** `npm run sync` always ran all seven endpoints and `npm run rawapi` all eleven tables, so refreshing a single table — or a targeted pass like UPD-7's id-window backfill — required a run across everything.

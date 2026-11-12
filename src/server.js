@@ -384,7 +384,11 @@ function buildResult(row, singular) {
   }
   if (singular === "concept") {
   const result = { id: row.id, name: row.name };
-  for (const field of ["aliases", "api_detail_url", "count_of_issue_appearances", "date_added", "date_last_updated", "deck", "description", "site_detail_url", "start_year"]) {
+  // UPD-13: the live API always emits api_detail_url; derive it from the id
+  // (canonical base URL + domain prefix 4015 + id) instead of reading a stored
+  // column, matching publisher (SRV-21) and team (SRV-22).
+  result.api_detail_url = buildApiDetailUrl("concept", row.id);
+  for (const field of ["aliases", "count_of_issue_appearances", "date_added", "date_last_updated", "deck", "description", "site_detail_url", "start_year"]) {
    if (has(field)) result[field] = row[field];
   }
   if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
