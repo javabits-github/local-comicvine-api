@@ -1020,6 +1020,31 @@ test("serves normalized localcv tables and reports missing resources cleanly", a
     const compositeVolumeBody = await compositeVolumeFilter.json();
     assert.deepEqual(compositeVolumeBody.results.map(({ id }) => id), [43]);
 
+    // SRV-27: a pipe-separated list of volume ids matches any of them (live ORs the tokens).
+    const pipeVolumeFilter = await fetch(`${localUrl}/api/issues?filter=volume:7300|73001&field_list=id`);
+    const pipeVolumeBody = await pipeVolumeFilter.json();
+    assert.equal(pipeVolumeFilter.status, 200, JSON.stringify(pipeVolumeBody));
+    assert.deepEqual(pipeVolumeBody.results.map(({ id }) => id), [42, 43]);
+
+    const pipeVolumeIdFilter = await fetch(`${localUrl}/api/issues?filter=volume_id:7300|73001&field_list=id`);
+    const pipeVolumeIdBody = await pipeVolumeIdFilter.json();
+    assert.deepEqual(pipeVolumeIdBody.results.map(({ id }) => id), [42, 43]);
+
+    // A domain-prefixed token and a plain token in the same list.
+    const mixedPipeFilter = await fetch(`${localUrl}/api/issues?filter=volume:4050-7300|73001&field_list=id`);
+    const mixedPipeBody = await mixedPipeFilter.json();
+    assert.deepEqual(mixedPipeBody.results.map(({ id }) => id), [42, 43]);
+
+    // A list containing a non-numeric token matches nothing (as on live).
+    const invalidPipeFilter = await fetch(`${localUrl}/api/issues?filter=volume:7300|abc&field_list=id`);
+    const invalidPipeBody = await invalidPipeFilter.json();
+    assert.equal(invalidPipeFilter.status, 200, JSON.stringify(invalidPipeBody));
+    assert.deepEqual(invalidPipeBody.results, []);
+
+    // A single non-numeric value still throws (unchanged behavior).
+    const invalidSingleFilter = await fetch(`${localUrl}/api/issues?filter=volume:abc&field_list=id`);
+    assert.equal(invalidSingleFilter.status, 400);
+
     const search = await fetch(`${localUrl}/api/search?query=Witchblade&resources=volume,issue&field_list=id,name,image,resource_type`);
     const searchBody = await search.json();
     assert.deepEqual(searchBody.results.map(({ resource_type }) => resource_type).sort(), ["issue", "volume"]);

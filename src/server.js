@@ -639,12 +639,32 @@ function parseFilters(filter, config) {
 
    const field = match[1];
    if (config.singular === "issue" && ["volume", "volume_id"].includes(field.toLowerCase())) {
-     const volumeIdMatch = match[2].trim().match(/(?:^|-)(\d+)$/);
-     if (!volumeIdMatch || !Number.isSafeInteger(Number(volumeIdMatch[1]))) {
-       throw new Error("Issue volume filters require a numeric volume ID.");
-      }
-     clauses.push(`${config.alias}.volume_id = ?`);
-     values.push(Number(volumeIdMatch[1]));
+     // SRV-27: a pipe-separated list of volume ids (filter=volume:1487|766) matches
+     // any of them via IN (...) — the live API ORs the tokens (verified 2026-11-12:
+     // 1487|766 -> 54 = 26 + 28). Each token must be all-numeric or domain-prefixed
+     // (4050-1487), like the single value; a list containing any other token falls
+     // back to the (matching-nothing) exact match. A single token keeps the current
+     // exact match (and still throws for a non-numeric value). This branch runs
+     // before the numeric range branch because volume ids are never a range.
+     const raw = match[2].trim();
+     const tokens = raw.split("|").map((token) => token.trim()).filter(Boolean);
+     const volumeIds = tokens.map((token) => token.match(/(?:^|-)(\d+)$/)?.[1]);
+     const allNumeric = tokens.length > 0 && volumeIds.every((id) => id !== undefined && Number.isSafeInteger(Number(id)));
+     if (tokens.length > 1 && allNumeric) {
+       clauses.push(`${config.alias}.volume_id IN (${volumeIds.map(() => "?").join(", ")})`);
+       values.push(...volumeIds.map((id) => Number(id)));
+     } else if (tokens.length === 1) {
+       const volumeId = volumeIds[0];
+       if (volumeId === undefined || !Number.isSafeInteger(Number(volumeId))) {
+         throw new Error("Issue volume filters require a numeric volume ID.");
+       }
+       clauses.push(`${config.alias}.volume_id = ?`);
+       values.push(Number(volumeId));
+     } else {
+       // A pipe-separated list containing a non-numeric token matches nothing, as on live.
+       clauses.push(`${config.alias}.volume_id = ?`);
+       values.push(raw);
+     }
      continue;
     }
 
