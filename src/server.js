@@ -28,8 +28,8 @@ const sortableStoryArcFields = new Set([
   "deck", "description", "id", "name", "site_detail_url"
 ]);
 const sortableConceptFields = new Set([
-  "aliases", "count_of_issue_appearances", "date_added", "date_last_updated",
-  "deck", "description", "id", "name", "site_detail_url", "start_year"
+  "aliases", "count_of_issue_appearances", "count_of_isssue_appearances", "date_added",
+  "date_last_updated", "deck", "description", "id", "name", "site_detail_url", "start_year"
 ]);
 const sortablePublisherFields = new Set([
   "aliases", "date_added", "date_last_updated", "deck", "description", "id", "name",
@@ -226,6 +226,43 @@ function buildVolumeResult(row, database) {
   return result;
 }
 
+// SRV-26: the three concept relationship collections, in the order the live API
+// emits them. credit_type in cv_concept_credit (UPD-14) maps to the field name.
+const CONCEPT_CREDIT_FIELDS = { issue: "issue_credits", movie: "movies", volume: "volume_credits" };
+
+// Rebuild a concept credit entry with the exact key order the live API emits
+// (api_detail_url, id, name, site_detail_url) — api_detail_url first, unlike the
+// volume credits' id-first order (creditRowToObject).
+function conceptCreditRowToObject(row) {
+  return {
+    api_detail_url: row.api_detail_url,
+    id: row.credit_id,
+    name: row.name,
+    site_detail_url: row.site_detail_url
+  };
+}
+
+// SRV-26: generate the three concept collections from the cv_concept_credit join
+// table (UPD-14). The live API never returns null for these (always an array), so
+// a concept with no join rows emits [] for each. Used only when the join table
+// exists; buildResult's [] fallback covers pre-UPD-14 databases and test fixtures.
+function buildConceptResult(row, database) {
+  const result = buildResult(row, "concept");
+
+  const creditRows = database
+    .prepare("SELECT * FROM cv_concept_credit WHERE concept_id = ? ORDER BY credit_type, position")
+    .all(row.id);
+  const creditsByType = {};
+  for (const credit of creditRows) {
+    (creditsByType[credit.credit_type] ??= []).push(credit);
+  }
+  for (const [type, field] of Object.entries(CONCEPT_CREDIT_FIELDS)) {
+    result[field] = (creditsByType[type] ?? []).map(conceptCreditRowToObject);
+  }
+
+  return result;
+}
+
 function buildResult(row, singular) {
   const has = (name) => Object.hasOwn(row, name);
   if (singular === "volume") {
@@ -388,11 +425,23 @@ function buildResult(row, singular) {
   // (canonical base URL + domain prefix 4015 + id) instead of reading a stored
   // column, matching publisher (SRV-21) and team (SRV-22).
   result.api_detail_url = buildApiDetailUrl("concept", row.id);
-  for (const field of ["aliases", "count_of_issue_appearances", "date_added", "date_last_updated", "deck", "description", "site_detail_url", "start_year"]) {
+  for (const field of ["aliases", "date_added", "date_last_updated", "deck", "description", "site_detail_url", "start_year"]) {
    if (has(field)) result[field] = row[field];
   }
+  // SRV-26: the live API emits the appearance count under its typo name; the
+  // stored column keeps the corrected spelling (same as person SRV-20 / team SRV-22).
+  if (has("count_of_issue_appearances")) result.count_of_isssue_appearances = row.count_of_issue_appearances;
   if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
-  if (has("first_appeared_in_issue")) result.first_appeared_in_issue = parseJsonColumn(row.first_appeared_in_issue);
+  // SRV-26: the live API emits null (not an absent key) when the stored
+  // first_appeared_in_issue is NULL; parseJsonColumn returns undefined for NULL,
+  // so coalesce to null to keep the key in the serialized output.
+  if (has("first_appeared_in_issue")) result.first_appeared_in_issue = parseJsonColumn(row.first_appeared_in_issue) ?? null;
+  // SRV-26: the live API never returns null for the three collections (always an
+  // array). The legacy path (no join table) emits [] for all three; buildConceptResult
+  // overwrites them with the cv_concept_credit rows when the join table exists.
+  for (const field of Object.values(CONCEPT_CREDIT_FIELDS)) {
+   result[field] = [];
+  }
   return result;
   }
   return null;
@@ -406,8 +455,8 @@ function columnExpression(config, field) {
   if (config.singular === "issue" && (lower === "volume" || lower === "volume_id")) {
    return { kind: "volume" };
    }
-  // SRV-20/SRV-22: the live API's typo count name maps to the corrected-spelling column.
-  if ((config.singular === "person" || config.singular === "team") && lower === "count_of_isssue_appearances") {
+  // SRV-20/SRV-22/SRV-26: the live API's typo count name maps to the corrected-spelling column.
+  if ((config.singular === "person" || config.singular === "team" || config.singular === "concept") && lower === "count_of_isssue_appearances") {
    return { kind: "column", expression: `${config.alias}.count_of_issue_appearances` };
    }
   if (config.columns.has(lower)) {
@@ -488,6 +537,12 @@ function buildResourceConfig(database, resource) {
   alias = "p";
   from = `${resource.table} ${alias}`;
   selectExtra = `${alias}.*`;
+  // SRV-26: generate the three concept collections from the cv_concept_credit
+  // join table once it exists (UPD-14); otherwise buildResult emits [] for all
+  // three (the live API is never null). Same pattern as the volume join tables.
+  if (singular === "concept" && tableColumns(database, "cv_concept_credit").size > 0) {
+   build = (row) => buildConceptResult(row, database);
+  }
   }
 
   const subquery = `SELECT ${selectExtra} FROM ${from}`;

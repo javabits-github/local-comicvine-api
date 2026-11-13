@@ -47,6 +47,10 @@ database.prepare("INSERT INTO cv_person (id, name, date_added) VALUES (?, ?, ?)"
     .run(1252, "Alex Ross", "1899-01-01 00:00:00");
 database.prepare("INSERT INTO cv_concept (id, name, aliases, deck, description, date_added, date_last_updated, image_url, site_detail_url, first_appeared_in_issue, count_of_issue_appearances, start_year) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run(58852, "Digital Comic", "DC", "A digital comic", "A digital comic description", "2020-01-01 00:00:00", "2026-01-01 00:00:00", "https://example.test/digital-comic.jpg", "https://example.test/digital-comic/", J({ id: 4001, name: "Test Series #1" }), 9, "2005");
+// SRV-26: a second concept with a NULL first_appeared_in_issue (the live API
+// emits null, not an absent key) to exercise the null coalesce in buildResult.
+database.prepare("INSERT INTO cv_concept (id, name, first_appeared_in_issue, count_of_issue_appearances) VALUES (?, ?, ?, ?)")
+    .run(58853, "Test Concept Null", null, 3);
 database.close();
 
 const requestLogs = [];
@@ -547,6 +551,124 @@ test("derives concept api_detail_url from the id (UPD-13)", async () => {
     name: "Digital Comic",
     api_detail_url: "https://comicvine.gamespot.com/api/concept/4015-58852/"
   });
+});
+
+test("emits the full concept shape with live names and types (SRV-26)", async () => {
+  const response = await fetch(`${baseUrl}/api/concept/4015-58852/?format=json`);
+  const body = await response.json();
+  const concept = body.results;
+
+  assert.equal(response.status, 200);
+  // The api_detail_url is derived from the id; the table has no such column.
+  assert.equal(concept.api_detail_url, "https://comicvine.gamespot.com/api/concept/4015-58852/");
+  // The internal image_url column no longer leaks; image is built from it (and
+  // expanded into the live API's full multi-URL object by normalizeResult).
+  assert.equal(Object.hasOwn(concept, "image_url"), false);
+  assert.equal(concept.image.original_url, "https://example.test/digital-comic.jpg");
+  assert.equal(concept.image.image_tags, "All Images");
+  // SRV-26: the count uses the live API's typo name; the corrected spelling is not emitted.
+  assert.equal(concept.count_of_isssue_appearances, 9);
+  assert.equal(Object.hasOwn(concept, "count_of_issue_appearances"), false);
+  // The non-null first_appeared_in_issue is emitted as an object.
+  assert.deepEqual(concept.first_appeared_in_issue, { id: 4001, name: "Test Series #1" });
+  // The three collections are always arrays (the live API never returns null).
+  assert.deepEqual(concept.issue_credits, []);
+  assert.deepEqual(concept.movies, []);
+  assert.deepEqual(concept.volume_credits, []);
+  // The remaining stored fields are emitted with their live names.
+  assert.equal(concept.aliases, "DC");
+  assert.equal(concept.deck, "A digital comic");
+  assert.equal(concept.description, "A digital comic description");
+  assert.equal(concept.date_added, "2020-01-01 00:00:00");
+  assert.equal(concept.date_last_updated, "2026-01-01 00:00:00");
+  assert.equal(concept.site_detail_url, "https://example.test/digital-comic/");
+  assert.equal(concept.start_year, "2005");
+});
+
+test("emits null (not an absent key) for a null first_appeared_in_issue (SRV-26)", async () => {
+  const response = await fetch(`${baseUrl}/api/concept/4015-58853/?format=json`);
+  const body = await response.json();
+  const concept = body.results;
+
+  assert.equal(response.status, 200);
+  // SRV-26: the live API emits null (not an absent key) when the stored value is NULL.
+  assert.equal(Object.hasOwn(concept, "first_appeared_in_issue"), true);
+  assert.equal(concept.first_appeared_in_issue, null);
+  // The count is emitted under the typo name.
+  assert.equal(concept.count_of_isssue_appearances, 3);
+  // The three collections are always arrays (the live API never returns null).
+  assert.deepEqual(concept.issue_credits, []);
+  assert.deepEqual(concept.movies, []);
+  assert.deepEqual(concept.volume_credits, []);
+});
+
+test("supports concept sort on the typo count and field selection (SRV-26)", async () => {
+  // SRV-26: the live API's typo count name sorts on the corrected-spelling column.
+  const sorted = await fetch(`${baseUrl}/api/concepts?format=json&sort=count_of_isssue_appearances:desc&limit=1&field_list=id,name`);
+  const sortedBody = await sorted.json();
+  assert.equal(sorted.status, 200);
+  // 58852 has count 9, 58853 has count 3 → 58852 sorts first.
+  assert.deepEqual(sortedBody.results, [{ id: 58852, name: "Digital Comic" }]);
+
+  const fields = "id,name,count_of_isssue_appearances,first_appeared_in_issue,issue_credits,movies,volume_credits";
+  const projected = await fetch(`${baseUrl}/api/concept/4015-58852/?format=json&field_list=${fields}`);
+  const projectedBody = await projected.json();
+  assert.deepEqual(projectedBody.results, {
+    id: 58852,
+    name: "Digital Comic",
+    count_of_isssue_appearances: 9,
+    first_appeared_in_issue: { id: 4001, name: "Test Series #1" },
+    issue_credits: [],
+    movies: [],
+    volume_credits: []
+  });
+});
+
+test("builds concept collections from the cv_concept_credit join (SRV-26)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-concept-join-test-"));
+  const joinDatabasePath = path.join(directory, "concept-join.db");
+  const joinDatabase = new DatabaseSync(joinDatabasePath);
+  joinDatabase.exec("CREATE TABLE cv_concept (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, count_of_issue_appearances INTEGER, start_year TEXT)");
+  joinDatabase.exec("CREATE TABLE cv_concept_credit (concept_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (concept_id, credit_type, position))");
+  joinDatabase.prepare("INSERT INTO cv_concept (id, name, count_of_issue_appearances, first_appeared_in_issue) VALUES (?, ?, ?, ?)")
+      .run(1, "Alternate Reality", 3643, null);
+  // issue_credits x2, movies x1, volume_credits x1.
+  joinDatabase.prepare("INSERT INTO cv_concept_credit (concept_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "issue", 0, 918825, "Some Issue #1", "https://example.test/issue/4000-918825/", "https://example.test/site/issue1");
+  joinDatabase.prepare("INSERT INTO cv_concept_credit (concept_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "issue", 1, 918826, "Some Issue #2", "https://example.test/issue/4000-918826/", "https://example.test/site/issue2");
+  joinDatabase.prepare("INSERT INTO cv_concept_credit (concept_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "movie", 0, 3204, "The Fantastic Four: First Steps", "https://example.test/movie/4025-3204/", "https://example.test/site/movie");
+  joinDatabase.prepare("INSERT INTO cv_concept_credit (concept_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "volume", 0, 7300, "Witchblade", "https://example.test/volume/4050-7300/", "https://example.test/site/volume");
+  joinDatabase.close();
+
+  const joinServer = createApiServer(joinDatabasePath, () => {});
+  await new Promise((resolve) => joinServer.listen(0, "127.0.0.1", resolve));
+  const joinUrl = `http://127.0.0.1:${joinServer.address().port}`;
+
+  try {
+    const detail = await (await fetch(`${joinUrl}/api/concept/4015-1/`)).json();
+    const result = detail.results;
+
+    // SRV-26: the collections are generated from the join table, api_detail_url-first.
+    assert.deepEqual(result.issue_credits, [
+      { api_detail_url: "https://example.test/issue/4000-918825/", id: 918825, name: "Some Issue #1", site_detail_url: "https://example.test/site/issue1" },
+      { api_detail_url: "https://example.test/issue/4000-918826/", id: 918826, name: "Some Issue #2", site_detail_url: "https://example.test/site/issue2" }
+    ]);
+    assert.deepEqual(result.movies, [
+      { api_detail_url: "https://example.test/movie/4025-3204/", id: 3204, name: "The Fantastic Four: First Steps", site_detail_url: "https://example.test/site/movie" }
+    ]);
+    assert.deepEqual(result.volume_credits, [
+      { api_detail_url: "https://example.test/volume/4050-7300/", id: 7300, name: "Witchblade", site_detail_url: "https://example.test/site/volume" }
+    ]);
+    // The count is emitted under the typo name; the null first_appeared_in_issue is null.
+    assert.equal(result.count_of_isssue_appearances, 3643);
+    assert.equal(result.first_appeared_in_issue, null);
+  } finally {
+    await new Promise((resolve) => joinServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("supports people fields, sorting, pagination, and filters", async () => {

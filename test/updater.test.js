@@ -162,6 +162,33 @@ function makeMockFetch() {
           start_year: "2005"
         }];
       }
+    } else if (ep.match(/\/concept\/4015-\d+\//)) {
+      // UPD-14: the two-phase syncConcepts fetches each concept's detail (the
+      // list endpoint silently drops the collections). Mirror the issue-detail
+      // branch: return the same scalars plus the three relationship collections.
+      const cid = parseInt(ep.match(/4015-(\d+)/)[1], 10);
+      const concept = {
+        id: cid, name: "Test Concept", aliases: "TC",
+        api_detail_url: "https://example.com/c/700",
+        count_of_isssue_appearances: 9,
+        deck: "A concept", description: "A concept desc",
+        date_added: "2020-01-01 00:00:00", date_last_updated: "2026-01-01 00:00:00",
+        image: { original_url: "https://example.com/concept.png" },
+        site_detail_url: "https://example.com/site/700",
+        first_appeared_in_issue: { id: 4001, name: "Test Series #1" },
+        start_year: "2005",
+        issue_credits: [
+          { id: 4001, name: "Test Series #1", api_detail_url: "https://example.com/i/4001", site_detail_url: "https://example.com/site/issue" },
+          { id: 4002, name: "Test Series #2", api_detail_url: "https://example.com/i/4002", site_detail_url: "https://example.com/site/issue" }
+        ],
+        movies: [
+          { id: 8001, name: "Test Movie", api_detail_url: "https://example.com/m/8001", site_detail_url: "https://example.com/site/movie" }
+        ],
+        volume_credits: [
+          { id: 300, name: "Test Series", api_detail_url: "https://example.com/v/300", site_detail_url: "https://example.com/site/300" }
+        ]
+      };
+      return { status: 200, ok: true, json: async () => ({ status_code: 1, results: concept }) };
     }
     return { status: 200, ok: true, json: async () => ({ status_code: 1, results, number_of_total_results: results.length }) };
   };
@@ -235,6 +262,28 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   // derives from the id (the fixture created it; the live value is canonical).
   const conceptCols = db.prepare("PRAGMA table_info(cv_concept)").all().map((c) => c.name);
   assert.ok(!conceptCols.includes("api_detail_url"), `api_detail_url should be dropped, got ${conceptCols.join(", ")}`);
+
+  // UPD-14: the three relationship collections are written as cv_concept_credit
+  // join rows (issue_credits x2, movies x1, volume_credits x1 = 4 rows). The
+  // detail call (not the list) supplies them, so the rows prove the two-phase
+  // sync fetched and persisted the collections.
+  const conceptCredits = db.prepare(
+    "SELECT * FROM cv_concept_credit WHERE concept_id=700 ORDER BY credit_type, position"
+  ).all();
+  assert.equal(conceptCredits.length, 4, `expected 4 concept credit rows, got ${conceptCredits.length}`);
+  const issueCredit = conceptCredits.find((r) => r.credit_type === "issue" && r.position === 0);
+  assert.equal(issueCredit.credit_id, 4001);
+  assert.equal(issueCredit.name, "Test Series #1");
+  assert.equal(issueCredit.api_detail_url, "https://example.com/i/4001");
+  assert.equal(issueCredit.site_detail_url, "https://example.com/site/issue");
+  const issueCredit1 = conceptCredits.find((r) => r.credit_type === "issue" && r.position === 1);
+  assert.equal(issueCredit1.credit_id, 4002);
+  const movieCredit = conceptCredits.find((r) => r.credit_type === "movie");
+  assert.equal(movieCredit.credit_id, 8001);
+  assert.equal(movieCredit.name, "Test Movie");
+  const volumeCredit = conceptCredits.find((r) => r.credit_type === "volume");
+  assert.equal(volumeCredit.credit_id, 300);
+  assert.equal(volumeCredit.name, "Test Series");
 
   // Metadata
   const meta = db.prepare("SELECT * FROM cv_sync_metadata WHERE endpoint='publishers'").get();

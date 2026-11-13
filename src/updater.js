@@ -532,6 +532,38 @@ class ComicVineUpdater {
     }
   }
 
+  // ─── UPD-14: concept credit normalization ─────────────────────────────────
+
+  // The three concept relationship collections (issue_credits, movies,
+  // volume_credits) are stored in a join table so the server can generate them
+  // directly (SRV-26). Modeled on SRV-6c's cv_volume_credit, minus the count
+  // column (concept entries carry no count/role). No presence bitmask is needed:
+  // the live API never returns null for these (always an array), so the server
+  // emits [] for a concept with no rows. credit_id has no FK: movies have no
+  // local table (SRV-3), and issue/volume refs may be absent from the subset DB;
+  // the denormalized display fields are kept inline per the SRV-6 design note.
+  // There is no backfill: the collections were never stored on cv_concept, so a
+  // full concepts sync populates the table.
+  ensureConceptCreditTables() {
+    if (!this.conn) return;
+    this.conn.exec(`
+      CREATE TABLE IF NOT EXISTS cv_concept_credit (
+        concept_id INTEGER NOT NULL,
+        credit_type TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        credit_id INTEGER,
+        name TEXT,
+        api_detail_url TEXT,
+        site_detail_url TEXT,
+        PRIMARY KEY (concept_id, credit_type, position)
+      )
+    `);
+    this.conn.exec(`
+      CREATE INDEX IF NOT EXISTS idx_concept_credit_type
+        ON cv_concept_credit (credit_type, credit_id)
+    `);
+  }
+
   // ─── SRV-5: FTS5 full-text search indexes ────────────────────────────────
 
   // The seven resource tables, in the order the server searches them. Each is
@@ -1391,18 +1423,129 @@ class ComicVineUpdater {
     this.setEndpointLastSync("storyarcs", endDate);
   }
 
+  // Fetch a single concept's detail from the live API (mirrors fetchVolumeDetails).
+  // The detail call returns the three relationship collections the list endpoint
+  // silently drops, plus the same scalar fields the list call requests.
+  // Returns the concept object, or null if the API call fails / rate-limits.
+  async fetchConceptDetails(conceptId) {
+    const fieldList = "id,name,aliases,count_of_isssue_appearances," +
+      "deck,description,date_added,date_last_updated,image," +
+      "site_detail_url,first_appeared_in_issue,start_year," +
+      "issue_credits,movies,volume_credits";
+    const data = await this.apiCall(`concept/4015-${conceptId}/`, { field_list: fieldList });
+    if (data) return data.results;
+    return null;
+  }
+
+  // Upsert a single concept: the scalar columns plus the three relationship
+  // collections written as cv_concept_credit join rows (UPD-14). The scalar
+  // upsert is unchanged; the join rows are DELETE-then-INSERT per credit type
+  // (idempotent, the SRV-6c pattern). Wrapped in a transaction so the scalars
+  // and the collections commit atomically. Returns true on success, false if the
+  // upsert fails (the caller then skips the concept, mirroring upsertIssue).
+  upsertConcept(conceptId, conceptData) {
+    const image = conceptData.image || null;
+    const imageUrl = image ? image.original_url : null;
+
+    const countOfIssueAppearances =
+      conceptData.count_of_isssue_appearances || conceptData.count_of_issue_appearances;
+    const firstAppeared = conceptData.first_appeared_in_issue
+      ? JSON.stringify(conceptData.first_appeared_in_issue)
+      : null;
+
+    const insertCredit = this.conn.prepare(`
+      INSERT INTO cv_concept_credit
+        (concept_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const deleteCredits = this.conn.prepare(
+      "DELETE FROM cv_concept_credit WHERE concept_id = ? AND credit_type = ?"
+    );
+
+    try {
+      this.conn.exec("BEGIN");
+      this.conn.prepare(`
+        INSERT INTO cv_concept
+          (id, name, aliases, deck, description,
+           date_added, date_last_updated, image_url, site_detail_url,
+           first_appeared_in_issue, count_of_issue_appearances, start_year)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          aliases = excluded.aliases,
+          deck = excluded.deck,
+          description = excluded.description,
+          date_added = excluded.date_added,
+          date_last_updated = excluded.date_last_updated,
+          image_url = excluded.image_url,
+          site_detail_url = excluded.site_detail_url,
+          first_appeared_in_issue = COALESCE(excluded.first_appeared_in_issue, cv_concept.first_appeared_in_issue),
+          count_of_issue_appearances = excluded.count_of_issue_appearances,
+          start_year = excluded.start_year
+      `).run(
+        conceptId, jsonify(conceptData.name), jsonify(conceptData.aliases),
+        jsonify(conceptData.deck), jsonify(conceptData.description),
+        jsonify(conceptData.date_added), jsonify(conceptData.date_last_updated),
+        imageUrl, conceptData.site_detail_url, firstAppeared,
+        jsonify(countOfIssueAppearances), jsonify(conceptData.start_year)
+      );
+
+      // UPD-14: the three relationship collections as join rows. The live API
+      // never returns null for these (always an array), so a missing/empty
+      // collection simply yields no rows (the server emits []).
+      for (const [field, type] of [["issue_credits", "issue"], ["movies", "movie"], ["volume_credits", "volume"]]) {
+        deleteCredits.run(conceptId, type);
+        const entries = conceptData[field];
+        if (!Array.isArray(entries)) continue;
+        entries.forEach((entry, position) => {
+          insertCredit.run(
+            conceptId, type, position,
+            entry.id ?? null, entry.name ?? null,
+            entry.api_detail_url ?? null, entry.site_detail_url ?? null
+          );
+        });
+      }
+      this.conn.exec("COMMIT");
+    } catch (e) {
+      try { this.conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
+      this.log(`    ✗ Failed to upsert concept ${conceptId}: ${e.message}`);
+      return false;
+    }
+
+    return true;
+  }
+
   async syncConcepts(startDate, endDate, full = false) {
     this.log(`\n--- Syncing Concepts ---${full ? " (FULL)" : ""}`);
     if (!this.conn) return;
 
+    // Resume state
+    const resumeState = this.getResumeState("concepts");
+    let processedIds = new Set();
+    if (resumeState && resumeState.processed_ids) {
+      processedIds = new Set(resumeState.processed_ids);
+      this.log(`  Resuming from previous run. Skipping ${processedIds.size} already processed concepts.`);
+    }
+
+    // Ensure metadata row exists
+    this.conn.prepare(
+      `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
+       VALUES (?, ?, ?)
+       ON CONFLICT(endpoint) DO NOTHING`
+    ).run("concepts", startDate, new Date().toISOString());
+
+    // UPD-14 phase 1: collect the changed ids. The live concepts/ list endpoint
+    // silently drops the relationship collections (verified 2026-11-12: a list
+    // call requesting them returns only id), so a cheap field_list=id is all the
+    // list phase needs; the collections come from the detail calls in phase 2.
+    const conceptIds = [];
     let offset = 0;
     const limit = 100;
 
+    this.log(`  Finding updated concepts...${full ? " (full sync)" : ""}`);
     while (true) {
       const params = {
-        field_list: "id,name,aliases,count_of_isssue_appearances," +
-          "deck,description,date_added,date_last_updated,image," +
-          "site_detail_url,first_appeared_in_issue,start_year",
+        field_list: "id",
         offset, limit
       };
       if (!full) params.filter = `date_last_updated:${startDate}|${endDate}`;
@@ -1414,58 +1557,56 @@ class ComicVineUpdater {
       const results = data.results || [];
       if (results.length === 0) break;
 
-      this.conn.exec("BEGIN");
       for (const concept of results) {
-        const conceptId = concept.id;
-        if (!conceptId) continue;
-
-        const image = concept.image || null;
-        const imageUrl = image ? image.original_url : null;
-        const exists = this.conn.prepare("SELECT id FROM cv_concept WHERE id = ?").get(conceptId);
-
-        const countOfIssueAppearances =
-          concept.count_of_isssue_appearances || concept.count_of_issue_appearances;
-        const firstAppeared = concept.first_appeared_in_issue
-          ? JSON.stringify(concept.first_appeared_in_issue)
-          : null;
-
-        this.conn.prepare(`
-          INSERT INTO cv_concept
-            (id, name, aliases, deck, description,
-             date_added, date_last_updated, image_url, site_detail_url,
-             first_appeared_in_issue, count_of_issue_appearances, start_year)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            aliases = excluded.aliases,
-            deck = excluded.deck,
-            description = excluded.description,
-            date_added = excluded.date_added,
-            date_last_updated = excluded.date_last_updated,
-            image_url = excluded.image_url,
-            site_detail_url = excluded.site_detail_url,
-            first_appeared_in_issue = COALESCE(excluded.first_appeared_in_issue, cv_concept.first_appeared_in_issue),
-            count_of_issue_appearances = excluded.count_of_issue_appearances,
-            start_year = excluded.start_year
-        `).run(
-          conceptId, jsonify(concept.name), jsonify(concept.aliases),
-          jsonify(concept.deck), jsonify(concept.description),
-          jsonify(concept.date_added), jsonify(concept.date_last_updated),
-          imageUrl, concept.site_detail_url, firstAppeared,
-          jsonify(countOfIssueAppearances), jsonify(concept.start_year)
-        );
-
-        if (exists) this.stats.concepts_updated++;
-        else this.stats.concepts_added++;
+        if (concept.id) conceptIds.push(concept.id);
       }
-      this.conn.exec("COMMIT");
 
       const total = data.number_of_total_results || 0;
-      this.log(`  Processed ${offset + results.length}/${total} concepts`);
+      this.log(`    Found ${offset + results.length}/${total} concepts to update`);
 
       if (results.length < limit) break;
       offset += limit;
     }
+
+    // Filter out already-processed concepts
+    const initialCount = conceptIds.length;
+    const remaining = conceptIds.filter((id) => !processedIds.has(id));
+    const skipped = initialCount - remaining.length;
+    if (skipped > 0) {
+      this.log(`  Skipping ${skipped} concepts (already processed). ${remaining.length} remaining.`);
+    }
+
+    // UPD-14 phase 2: one detail call per id (returns the collections the list
+    // endpoint drops) and an upsert of the scalars + cv_concept_credit join rows.
+    this.log(`  Fetching details for ${remaining.length} concepts...`);
+    for (let i = 0; i < remaining.length; i++) {
+      const conceptId = remaining[i];
+      const conceptData = await this.fetchConceptDetails(conceptId);
+      if (!conceptData) continue;
+
+      const exists = this.conn.prepare("SELECT id FROM cv_concept WHERE id = ?").get(conceptId);
+      if (!this.upsertConcept(conceptId, conceptData)) continue;
+
+      if (exists) this.stats.concepts_updated++;
+      else this.stats.concepts_added++;
+
+      if (this.verbose || (i + 1) % 100 === 0) {
+        const action = exists ? "Updated" : "Added";
+        this.log(`    [${i + 1}/${remaining.length}] ${action} concept: ${conceptData.name}`);
+      }
+
+      processedIds.add(conceptId);
+
+      // Commit periodically and save state
+      if ((i + 1) % 50 === 0) {
+        this.saveResumeState("concepts", { processed_ids: [...processedIds] });
+        this.log(`    --- SAVED RESUME STATE (${i + 1}/${remaining.length}) ---`);
+      }
+    }
+
+    // Clear resume state on successful completion
+    this.clearResumeState("concepts");
+    this.log(`  Completed ${remaining.length} concepts`);
 
     this.setEndpointLastSync("concepts", endDate);
   }
@@ -1581,6 +1722,7 @@ class ComicVineUpdater {
     this.ensureMetadataTable();
     this.ensureResourceTables();
     this.ensureVolumeCreditTables();
+    this.ensureConceptCreditTables();
     this.ensureFtsTables();
 
     const endDate = todayStr();

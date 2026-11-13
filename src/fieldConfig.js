@@ -58,12 +58,16 @@ const storyArcFields = new Set([
   "issues", "movies", "name", "publisher", "site_detail_url"
 ]);
 const storyArcRelationshipFields = new Set(["issues", "movies"]);
+// SRV-26: the live API emits the appearance count under its typo name and always
+// returns the three relationship collections (never null); the allowlist uses the
+// live names so field_list matches the live API (same as person SRV-20 / team SRV-22).
 const conceptFields = new Set([
-  "aliases", "api_detail_url", "count_of_issue_appearances", "date_added",
+  "aliases", "api_detail_url", "count_of_isssue_appearances", "date_added",
   "date_last_updated", "deck", "description", "first_appeared_in_issue", "id",
-  "image", "name", "site_detail_url", "start_year"
+  "image", "issue_credits", "movies", "name", "site_detail_url", "start_year",
+  "volume_credits"
 ]);
-const conceptRelationshipFields = new Set();
+const conceptRelationshipFields = new Set(["issue_credits", "movies", "volume_credits"]);
 const publisherFields = new Set([
   "aliases", "api_detail_url", "characters", "date_added", "date_last_updated", "deck",
   "description", "id", "image", "location_address", "location_city", "location_state",
