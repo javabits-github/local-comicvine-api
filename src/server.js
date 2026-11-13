@@ -35,6 +35,20 @@ const sortablePublisherFields = new Set([
   "aliases", "date_added", "date_last_updated", "deck", "description", "id", "name",
   "site_detail_url"
 ]);
+// SRV-3: the three new resources. Powers have no deck, so their allowlist
+// omits it.
+const sortableCharacterFields = new Set([
+  "aliases", "birth", "count_of_issue_appearances", "date_added", "date_last_updated",
+  "deck", "description", "gender", "id", "name", "real_name", "site_detail_url"
+]);
+const sortableLocationFields = new Set([
+  "aliases", "count_of_issue_appearances", "date_added", "date_last_updated",
+  "deck", "description", "id", "name", "site_detail_url", "start_year"
+]);
+const sortablePowerFields = new Set([
+  "aliases", "date_added", "date_last_updated", "description", "id", "name",
+  "site_detail_url"
+]);
 const sortablePersonFields = new Set([
   "aliases", "birth", "count_of_issue_appearances", "count_of_isssue_appearances", "country",
   "date_added", "date_last_updated", "death", "deck", "description", "gender", "hometown", "id", "name"
@@ -58,7 +72,10 @@ const sortableFieldsByResource = {
   story_arc: sortableStoryArcFields,
   team: sortableTeamFields,
   volume: sortableVolumeFields,
-  concept: sortableConceptFields
+  concept: sortableConceptFields,
+  character: sortableCharacterFields,
+  location: sortableLocationFields,
+  power: sortablePowerFields
 };
 
 // SRV-1: the default sort column each list endpoint uses when the client does not
@@ -72,7 +89,10 @@ const defaultSortByResource = {
   story_arc: "id",
   team: "id",
   volume: "id",
-  concept: "id"
+  concept: "id",
+  character: "id",
+  location: "id",
+  power: "id"
 };
 
 // Per-resource field allowlist and relationship sets live in fieldConfig.js, shared
@@ -461,6 +481,81 @@ function buildResult(row, singular) {
   }
   return result;
   }
+  // SRV-3: character (domain prefix 4005). The relationship collections are
+  // stored as JSON text (the pre-SRV-6 denormalized pattern); the live API
+  // never returns null for them, so a missing/empty collection emits [].
+  if (singular === "character") {
+  const result = { id: row.id, name: row.name };
+  // SRV-3: the live API always emits api_detail_url; derive it from the id
+  // (the table has no such column; same approach as team, SRV-22).
+  result.api_detail_url = buildApiDetailUrl("character", row.id);
+  for (const field of ["aliases", "birth", "deck", "description", "date_added", "date_last_updated", "gender", "real_name", "site_detail_url"]) {
+   if (has(field)) result[field] = row[field];
+  }
+  if (has("count_of_issue_appearances")) result.count_of_issue_appearances = row.count_of_issue_appearances;
+  if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
+  // SRV-3: first_appeared_in_issue is derived from the stored issue id (the
+  // UPD-15 concept pattern): api_detail_url via buildApiDetailUrl, name and
+  // issue_number from the LEFT JOIN cv_issue added in buildResourceConfig
+  // (null when the issue isn't in the subset DB). A NULL id emits null.
+  if (has("first_appeared_in_issue_id")) {
+    const issueId = row.first_appeared_in_issue_id;
+    result.first_appeared_in_issue = (issueId === null || issueId === undefined)
+      ? null
+      : {
+        api_detail_url: buildApiDetailUrl("first_appeared_in_issue", issueId),
+        id: issueId,
+        name: row.first_appeared_issue_name ?? null,
+        issue_number: row.first_appeared_issue_number ?? null
+      };
+  }
+  // The scalar references are stored as JSON objects; a missing/empty value
+  // emits null (the live API emits null, not an absent key).
+  for (const field of ["publisher", "origin"]) {
+   result[field] = has(field) ? (parseJsonColumn(row[field]) ?? null) : null;
+  }
+  for (const field of ["teams", "movies", "powers", "creators", "issue_credits", "volume_credits", "story_arc_credits", "issues_died_in", "character_enemies", "character_friends", "team_enemies", "team_friends"]) {
+   result[field] = has(field) ? (parseJsonColumn(row[field]) ?? []) : [];
+  }
+  return result;
+  }
+  // SRV-3: location (domain prefix 4020).
+  if (singular === "location") {
+  const result = { id: row.id, name: row.name };
+  result.api_detail_url = buildApiDetailUrl("location", row.id);
+  for (const field of ["aliases", "deck", "description", "date_added", "date_last_updated", "site_detail_url", "start_year"]) {
+   if (has(field)) result[field] = row[field];
+  }
+  if (has("count_of_issue_appearances")) result.count_of_issue_appearances = row.count_of_issue_appearances;
+  if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
+  if (has("first_appeared_in_issue_id")) {
+    const issueId = row.first_appeared_in_issue_id;
+    result.first_appeared_in_issue = (issueId === null || issueId === undefined)
+      ? null
+      : {
+        api_detail_url: buildApiDetailUrl("first_appeared_in_issue", issueId),
+        id: issueId,
+        name: row.first_appeared_issue_name ?? null,
+        issue_number: row.first_appeared_issue_number ?? null
+      };
+  }
+  for (const field of ["issue_credits", "volume_credits", "story_arc_credits", "movies"]) {
+   result[field] = has(field) ? (parseJsonColumn(row[field]) ?? []) : [];
+  }
+  return result;
+  }
+  // SRV-3: power (domain prefix 4035). No deck, appearance count, or
+  // first_appeared_in_issue.
+  if (singular === "power") {
+  const result = { id: row.id, name: row.name };
+  result.api_detail_url = buildApiDetailUrl("power", row.id);
+  for (const field of ["aliases", "description", "date_added", "date_last_updated", "site_detail_url"]) {
+   if (has(field)) result[field] = row[field];
+  }
+  if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
+  result.characters = has("characters") ? (parseJsonColumn(row.characters) ?? []) : [];
+  return result;
+  }
   return null;
 }
 
@@ -559,7 +654,8 @@ function buildResourceConfig(database, resource) {
   // volume-join pattern. Added only when the id column exists and cv_issue is
   // available; otherwise the reference's display fields degrade to null (the
   // SRV-6c behavior for a ref whose row isn't in the subset DB).
-  if (singular === "concept" && has("first_appeared_in_issue_id") && tableColumns(database, "cv_issue").size > 0) {
+  // SRV-3: character and location use the same id-join pattern as concept.
+  if ((singular === "concept" || singular === "character" || singular === "location") && has("first_appeared_in_issue_id") && tableColumns(database, "cv_issue").size > 0) {
    from += " LEFT JOIN cv_issue i ON i.id = p.first_appeared_in_issue_id";
    selectExtra += ", i.name AS first_appeared_issue_name, i.issue_number AS first_appeared_issue_number";
   }

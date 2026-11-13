@@ -189,6 +189,60 @@ function makeMockFetch() {
         ]
       };
       return { status: 200, ok: true, json: async () => ({ status_code: 1, results: concept }) };
+    } else if (ep.includes("/characters/")) {
+      if (offset === 0) {
+        results = [{
+          id: 800, name: "Test Character", aliases: "TC", real_name: "Real Name",
+          birth: "1990-01-01", gender: 1,
+          deck: "A character", description: "A character desc",
+          date_added: "2020-01-01 00:00:00", date_last_updated: "2026-01-01 00:00:00",
+          image: { original_url: "https://example.com/char.png" },
+          site_detail_url: "https://example.com/site/800",
+          count_of_issue_appearances: 42,
+          first_appeared_in_issue: { id: 4001, name: "Test Series #1" },
+          publisher: { id: 100, name: "Acme Comics" },
+          origin: { id: 50, name: "Test Origin" },
+          teams: [{ id: 500, name: "Test Team" }],
+          powers: [{ id: 950, name: "Test Power" }],
+          issue_credits: [{ id: 4001, name: "Test Series #1" }],
+          issues_died_in: [],
+          movies: [],
+          creators: [],
+          volume_credits: [],
+          story_arc_credits: [],
+          character_enemies: [],
+          character_friends: [],
+          team_enemies: [],
+          team_friends: []
+        }];
+      }
+    } else if (ep.includes("/locations/")) {
+      if (offset === 0) {
+        results = [{
+          id: 900, name: "Test Location", aliases: "TL",
+          deck: "A location", description: "A location desc", start_year: "1985",
+          date_added: "2020-01-01 00:00:00", date_last_updated: "2026-01-01 00:00:00",
+          image: { original_url: "https://example.com/loc.png" },
+          site_detail_url: "https://example.com/site/900",
+          count_of_issue_appearances: 7,
+          first_appeared_in_issue: { id: 4001, name: "Test Series #1" },
+          issue_credits: [{ id: 4001, name: "Test Series #1" }],
+          volume_credits: [],
+          story_arc_credits: [],
+          movies: []
+        }];
+      }
+    } else if (ep.includes("/powers/")) {
+      if (offset === 0) {
+        results = [{
+          id: 950, name: "Test Power", aliases: "TP",
+          description: "A power desc",
+          date_added: "2020-01-01 00:00:00", date_last_updated: "2026-01-01 00:00:00",
+          image: { original_url: "https://example.com/power.png" },
+          site_detail_url: "https://example.com/site/950",
+          characters: [{ id: 800, name: "Test Character" }]
+        }];
+      }
     }
     return { status: 200, ok: true, json: async () => ({ status_code: 1, results, number_of_total_results: results.length }) };
   };
@@ -290,6 +344,35 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   const volumeCredit = conceptCredits.find((r) => r.credit_type === "volume");
   assert.equal(volumeCredit.credit_id, 300);
   assert.equal(volumeCredit.name, "Test Series");
+
+  // SRV-3: character
+  const character = db.prepare("SELECT * FROM cv_character WHERE id=800").get();
+  assert.ok(character, "character row should exist");
+  assert.equal(character.name, "Test Character");
+  assert.equal(character.real_name, "Real Name");
+  assert.equal(character.gender, 1);
+  assert.equal(character.count_of_issue_appearances, 42);
+  assert.equal(character.first_appeared_in_issue_id, 4001);
+  assert.equal(character.image_url, "https://example.com/char.png");
+  assert.equal(JSON.parse(character.teams)[0].name, "Test Team");
+  assert.equal(JSON.parse(character.powers)[0].name, "Test Power");
+  assert.equal(JSON.parse(character.issues_died_in).length, 0);
+
+  // SRV-3: location
+  const location = db.prepare("SELECT * FROM cv_location WHERE id=900").get();
+  assert.ok(location, "location row should exist");
+  assert.equal(location.name, "Test Location");
+  assert.equal(location.start_year, "1985");
+  assert.equal(location.count_of_issue_appearances, 7);
+  assert.equal(location.first_appeared_in_issue_id, 4001);
+  assert.equal(JSON.parse(location.issue_credits)[0].name, "Test Series #1");
+
+  // SRV-3: power
+  const power = db.prepare("SELECT * FROM cv_power WHERE id=950").get();
+  assert.ok(power, "power row should exist");
+  assert.equal(power.name, "Test Power");
+  assert.equal(power.aliases, "TP");
+  assert.equal(JSON.parse(power.characters)[0].name, "Test Character");
 
   // Metadata
   const meta = db.prepare("SELECT * FROM cv_sync_metadata WHERE endpoint='publishers'").get();

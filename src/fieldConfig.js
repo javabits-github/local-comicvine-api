@@ -16,6 +16,11 @@ const DOMAIN_PREFIXES = {
   story_arc: "4045",
   publisher: "4010",
   concept: "4015",
+  // SRV-3: the three new resources, verified against the live API (and the
+  // verbatim raw-API dump) on 2026-11-13.
+  character: "4005",
+  location: "4020",
+  power: "4035",
   // UPD-15: the first_appeared_in_issue reference's api_detail_url uses the
   // resource-type segment `first_appeared_in_issue` (not `issue`) with the same
   // 4000 numeric prefix — …/api/first_appeared_in_issue/4000-<id>/. Verified
@@ -73,6 +78,34 @@ const conceptFields = new Set([
   "volume_credits"
 ]);
 const conceptRelationshipFields = new Set(["issue_credits", "movies", "volume_credits"]);
+// SRV-3: the live API emits the appearance count under its corrected spelling
+// for characters and locations (the January raw-API dump shows
+// `count_of_issue_appearances`, unlike person/team/concept which use the typo).
+const characterFields = new Set([
+  "aliases", "api_detail_url", "birth", "character_enemies", "character_friends",
+  "count_of_issue_appearances", "creators", "date_added", "date_last_updated",
+  "deck", "description", "first_appeared_in_issue", "gender", "id", "image",
+  "issues_died_in", "name", "origin", "powers", "publisher", "real_name",
+  "site_detail_url", "story_arc_credits", "teams", "team_enemies", "team_friends",
+  "volume_credits", "movies"
+]);
+const characterRelationshipFields = new Set([
+  "character_enemies", "character_friends", "creators", "issues_died_in",
+  "movies", "powers", "publisher", "origin", "story_arc_credits", "teams",
+  "team_enemies", "team_friends", "volume_credits"
+]);
+const locationFields = new Set([
+  "aliases", "api_detail_url", "count_of_issue_appearances", "date_added",
+  "date_last_updated", "deck", "description", "first_appeared_in_issue", "id",
+  "image", "issue_credits", "movies", "name", "site_detail_url", "start_year",
+  "story_arc_credits", "volume_credits"
+]);
+const locationRelationshipFields = new Set(["issue_credits", "movies", "story_arc_credits", "volume_credits"]);
+const powerFields = new Set([
+  "aliases", "api_detail_url", "characters", "date_added", "date_last_updated",
+  "description", "id", "image", "name", "site_detail_url"
+]);
+const powerRelationshipFields = new Set(["characters"]);
 const publisherFields = new Set([
   "aliases", "api_detail_url", "characters", "date_added", "date_last_updated", "deck",
   "description", "id", "image", "location_address", "location_city", "location_state",
@@ -119,7 +152,11 @@ const resourceConfig = {
   concept: { fields: conceptFields, relationships: conceptRelationshipFields },
   publisher: { fields: publisherFields, relationships: publisherRelationshipFields },
   person: { fields: personFields, relationships: personRelationshipFields },
-  issue: { fields: issueFields, relationships: issueRelationshipFields }
+  issue: { fields: issueFields, relationships: issueRelationshipFields },
+  // SRV-3: the three new resources.
+  character: { fields: characterFields, relationships: characterRelationshipFields },
+  location: { fields: locationFields, relationships: locationRelationshipFields },
+  power: { fields: powerFields, relationships: powerRelationshipFields }
 };
 
 module.exports = { resourceConfig, API_BASE_URL, DOMAIN_PREFIXES, buildApiDetailUrl };

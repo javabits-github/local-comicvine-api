@@ -22,12 +22,12 @@
  * npm run sync          — incremental sync
  * npm run sync:full     — one-time full sync (thousands of API calls)
  *
- * A full sync is expensive (one call per page across all seven endpoints, i.e.
+ * A full sync is expensive (one call per page across all ten endpoints, i.e.
  * ~1.1M issue-detail calls). It is gated behind an interactive "yes" prompt,
  * or the --yes flag in non-interactive runs (UPD-2).
  *
  * --resource <name> restricts the run to specific resource(s) instead of all
- * seven — repeatable and/or comma-separated, accepting the endpoint name, the
+ * ten — repeatable and/or comma-separated, accepting the endpoint name, the
  * cv_* table name, or the singular (e.g. issue / issues / cv_issue). Post-sync
  * maintenance (volume/issue-count recalc, FTS rebuild) runs only for the
  * selected resources (UPD-12).
@@ -54,7 +54,7 @@ const RATE_LIMIT_BACKOFF_SECONDS = 60;
 
 // ─── Resources (UPD-12) ──────────────────────────────────────────────────────
 //
-// The seven endpoints runSync can sync, in the order they run. `name` is the
+// The ten endpoints runSync can sync, in the order they run. `name` is the
 // endpoint (and the cv_sync_metadata key); `method` is the sync method;
 // `table` is the cv_* table; `stats` is the stats-key prefix (note: the
 // `people` endpoint reports under `persons_*`); `statsLabel` is the display
@@ -67,7 +67,14 @@ const RESOURCES = [
   { name: "issues",     method: "syncIssues",     label: "issues",      stats: "issues",     statsLabel: "Issues",      table: "cv_issue",     fts: "cv_issue_fts",     aliases: ["issue", "cv_issue"] },
   { name: "teams",      method: "syncTeams",      label: "teams",       stats: "teams",      statsLabel: "Teams",       table: "cv_team",      fts: "cv_team_fts",      aliases: ["team", "cv_team"] },
   { name: "storyarcs",  method: "syncStoryarcs",  label: "story arcs",  stats: "storyarcs",  statsLabel: "Story arcs",   table: "cv_storyarc",  fts: "cv_storyarc_fts",  aliases: ["storyarc", "story_arc", "story_arcs", "cv_storyarc"] },
-  { name: "concepts",   method: "syncConcepts",   label: "concepts",    stats: "concepts",   statsLabel: "Concepts",    table: "cv_concept",   fts: "cv_concept_fts",   aliases: ["concept", "cv_concept"] }
+  { name: "concepts",   method: "syncConcepts",   label: "concepts",    stats: "concepts",   statsLabel: "Concepts",    table: "cv_concept",   fts: "cv_concept_fts",   aliases: ["concept", "cv_concept"] },
+  // SRV-3: the three remaining 404 resources (object stays open). Their live
+  // list endpoints return the scalar fields plus the relationship collections,
+  // so a single-phase list-paging sync (the teams/publishers pattern) is
+  // sufficient — no two-phase detail calls.
+  { name: "characters", method: "syncCharacters", label: "characters",  stats: "characters", statsLabel: "Characters",  table: "cv_character", fts: "cv_character_fts", aliases: ["character", "cv_character"] },
+  { name: "locations",  method: "syncLocations",  label: "locations",   stats: "locations",  statsLabel: "Locations",   table: "cv_location",  fts: "cv_location_fts",  aliases: ["location", "cv_location"] },
+  { name: "powers",     method: "syncPowers",     label: "powers",      stats: "powers",     statsLabel: "Powers",      table: "cv_power",     fts: "cv_power_fts",     aliases: ["power", "cv_power"] }
 ];
 
 // Resolve a user-supplied resource name (endpoint name, cv_* table name, or
@@ -172,7 +179,7 @@ class ComicVineUpdater {
     this.logCapture = options.logCapture || null;
     this.full = Boolean(options.full);
     // UPD-12: restrict the run to specific resources (RESOURCES registry
-    // entries). null/undefined = all seven.
+    // entries). null/undefined = all ten.
     this.resources = options.resources || null;
     this.fetchFn = options.fetchFn || globalThis.fetch;
     // Injectable delays (tests pass 0 to skip the real waits).
@@ -188,6 +195,9 @@ class ComicVineUpdater {
       teams_added: 0, teams_updated: 0,
       storyarcs_added: 0, storyarcs_updated: 0,
       concepts_added: 0, concepts_updated: 0,
+      characters_added: 0, characters_updated: 0,
+      locations_added: 0, locations_updated: 0,
+      powers_added: 0, powers_updated: 0,
       api_calls: 0
     };
   }
@@ -395,10 +405,44 @@ class ComicVineUpdater {
         this.log("  Keeping cv_concept.first_appeared_in_issue (backfill did not complete).");
       }
     }
+    // SRV-3: the three remaining 404 resources (object stays open). The
+    // relationship collections are stored as JSON text (the pre-SRV-6
+    // denormalized pattern); their normalization belongs with SRV-6.
+    // first_appeared_in_issue is stored as the issue id (the UPD-15 concept
+    // pattern) so the server can derive the object and join cv_issue.
+    this.conn.exec(`
+      CREATE TABLE IF NOT EXISTS cv_character (
+        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, real_name TEXT,
+        birth TEXT, gender INTEGER, deck TEXT, description TEXT,
+        date_added TEXT, date_last_updated TEXT, image_url TEXT,
+        site_detail_url TEXT, first_appeared_in_issue_id INTEGER,
+        count_of_issue_appearances INTEGER,
+        publisher TEXT, origin TEXT, teams TEXT, movies TEXT, powers TEXT,
+        creators TEXT, issue_credits TEXT, volume_credits TEXT,
+        story_arc_credits TEXT, issues_died_in TEXT, character_enemies TEXT,
+        character_friends TEXT, team_enemies TEXT, team_friends TEXT
+      )
+    `);
+    this.conn.exec(`
+      CREATE TABLE IF NOT EXISTS cv_location (
+        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT,
+        description TEXT, start_year TEXT, date_added TEXT, date_last_updated TEXT,
+        image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER,
+        count_of_issue_appearances INTEGER,
+        issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, movies TEXT
+      )
+    `);
+    this.conn.exec(`
+      CREATE TABLE IF NOT EXISTS cv_power (
+        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, description TEXT,
+        date_added TEXT, date_last_updated TEXT, image_url TEXT,
+        site_detail_url TEXT, characters TEXT
+      )
+    `);
     // Seed last_sync_date for new endpoints at the raw-dump snapshot date.
     const snapshot = "2026-01-22";
     const timestamp = new Date().toISOString();
-    for (const endpoint of ["teams", "storyarcs", "concepts"]) {
+    for (const endpoint of ["teams", "storyarcs", "concepts", "characters", "locations", "powers"]) {
       this.conn.prepare(
         `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
          VALUES (?, ?, ?)
@@ -1476,6 +1520,273 @@ class ComicVineUpdater {
     this.setEndpointLastSync("storyarcs", endDate);
   }
 
+  // SRV-3: single-phase list-paging sync (the teams/publishers pattern). The
+  // live characters/ list endpoint returns the scalar fields plus the
+  // relationship collections, so no two-phase detail calls are needed.
+  // first_appeared_in_issue is stored as the issue id (the UPD-15 concept
+  // pattern); the collections are stored as JSON text (pre-SRV-6 pattern).
+  async syncCharacters(startDate, endDate, full = false) {
+    this.log(`\n--- Syncing Characters ---${full ? " (FULL)" : ""}`);
+    if (!this.conn) return;
+
+    let offset = 0;
+    const limit = 100;
+
+    while (true) {
+      const params = {
+        field_list: "id,name,aliases,real_name,birth,gender,deck,description," +
+          "date_added,date_last_updated,image,site_detail_url," +
+          "count_of_issue_appearances,first_appeared_in_issue," +
+          "publisher,origin,teams,movies,powers,creators," +
+          "issue_credits,volume_credits,story_arc_credits," +
+          "issues_died_in,character_enemies,character_friends," +
+          "team_enemies,team_friends",
+        offset, limit
+      };
+      if (!full) params.filter = `date_last_updated:${startDate}|${endDate}`;
+      params.sort = "date_last_updated:asc";
+
+      const data = await this.apiCall("characters/", params);
+      if (!data) throw new Error("API call failed for characters");
+
+      const results = data.results || [];
+      if (results.length === 0) break;
+
+      this.conn.exec("BEGIN");
+      for (const character of results) {
+        const characterId = character.id;
+        if (!characterId) continue;
+
+        const image = character.image || null;
+        const imageUrl = image ? image.original_url : null;
+        const exists = this.conn.prepare("SELECT id FROM cv_character WHERE id = ?").get(characterId);
+
+        const firstAppearedId = character.first_appeared_in_issue?.id ?? null;
+
+        this.conn.prepare(`
+          INSERT INTO cv_character
+            (id, name, aliases, real_name, birth, gender, deck, description,
+             date_added, date_last_updated, image_url, site_detail_url,
+             first_appeared_in_issue_id, count_of_issue_appearances,
+             publisher, origin, teams, movies, powers, creators,
+             issue_credits, volume_credits, story_arc_credits,
+             issues_died_in, character_enemies, character_friends,
+             team_enemies, team_friends)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            aliases = excluded.aliases,
+            real_name = excluded.real_name,
+            birth = excluded.birth,
+            gender = excluded.gender,
+            deck = excluded.deck,
+            description = excluded.description,
+            date_added = excluded.date_added,
+            date_last_updated = excluded.date_last_updated,
+            image_url = excluded.image_url,
+            site_detail_url = excluded.site_detail_url,
+            first_appeared_in_issue_id = COALESCE(excluded.first_appeared_in_issue_id, cv_character.first_appeared_in_issue_id),
+            count_of_issue_appearances = excluded.count_of_issue_appearances,
+            publisher = excluded.publisher,
+            origin = excluded.origin,
+            teams = excluded.teams,
+            movies = excluded.movies,
+            powers = excluded.powers,
+            creators = excluded.creators,
+            issue_credits = excluded.issue_credits,
+            volume_credits = excluded.volume_credits,
+            story_arc_credits = excluded.story_arc_credits,
+            issues_died_in = excluded.issues_died_in,
+            character_enemies = excluded.character_enemies,
+            character_friends = excluded.character_friends,
+            team_enemies = excluded.team_enemies,
+            team_friends = excluded.team_friends
+        `).run(
+          characterId, jsonify(character.name), jsonify(character.aliases),
+          jsonify(character.real_name), jsonify(character.birth),
+          jsonify(character.gender), jsonify(character.deck),
+          jsonify(character.description),
+          jsonify(character.date_added), jsonify(character.date_last_updated),
+          imageUrl, character.site_detail_url, firstAppearedId,
+          jsonify(character.count_of_issue_appearances),
+          jsonify(character.publisher), jsonify(character.origin),
+          jsonify(character.teams), jsonify(character.movies),
+          jsonify(character.powers), jsonify(character.creators),
+          jsonify(character.issue_credits), jsonify(character.volume_credits),
+          jsonify(character.story_arc_credits), jsonify(character.issues_died_in),
+          jsonify(character.character_enemies), jsonify(character.character_friends),
+          jsonify(character.team_enemies), jsonify(character.team_friends)
+        );
+
+        if (exists) this.stats.characters_updated++;
+        else this.stats.characters_added++;
+      }
+      this.conn.exec("COMMIT");
+
+      const total = data.number_of_total_results || 0;
+      this.log(`  Processed ${offset + results.length}/${total} characters`);
+
+      if (results.length < limit) break;
+      offset += limit;
+    }
+
+    this.setEndpointLastSync("characters", endDate);
+  }
+
+  // SRV-3: single-phase list-paging sync (the teams/publishers pattern).
+  async syncLocations(startDate, endDate, full = false) {
+    this.log(`\n--- Syncing Locations ---${full ? " (FULL)" : ""}`);
+    if (!this.conn) return;
+
+    let offset = 0;
+    const limit = 100;
+
+    while (true) {
+      const params = {
+        field_list: "id,name,aliases,deck,description,start_year," +
+          "date_added,date_last_updated,image,site_detail_url," +
+          "count_of_issue_appearances,first_appeared_in_issue," +
+          "issue_credits,volume_credits,story_arc_credits,movies",
+        offset, limit
+      };
+      if (!full) params.filter = `date_last_updated:${startDate}|${endDate}`;
+      params.sort = "date_last_updated:asc";
+
+      const data = await this.apiCall("locations/", params);
+      if (!data) throw new Error("API call failed for locations");
+
+      const results = data.results || [];
+      if (results.length === 0) break;
+
+      this.conn.exec("BEGIN");
+      for (const location of results) {
+        const locationId = location.id;
+        if (!locationId) continue;
+
+        const image = location.image || null;
+        const imageUrl = image ? image.original_url : null;
+        const exists = this.conn.prepare("SELECT id FROM cv_location WHERE id = ?").get(locationId);
+
+        const firstAppearedId = location.first_appeared_in_issue?.id ?? null;
+
+        this.conn.prepare(`
+          INSERT INTO cv_location
+            (id, name, aliases, deck, description, start_year,
+             date_added, date_last_updated, image_url, site_detail_url,
+             first_appeared_in_issue_id, count_of_issue_appearances,
+             issue_credits, volume_credits, story_arc_credits, movies)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            aliases = excluded.aliases,
+            deck = excluded.deck,
+            description = excluded.description,
+            start_year = excluded.start_year,
+            date_added = excluded.date_added,
+            date_last_updated = excluded.date_last_updated,
+            image_url = excluded.image_url,
+            site_detail_url = excluded.site_detail_url,
+            first_appeared_in_issue_id = COALESCE(excluded.first_appeared_in_issue_id, cv_location.first_appeared_in_issue_id),
+            count_of_issue_appearances = excluded.count_of_issue_appearances,
+            issue_credits = excluded.issue_credits,
+            volume_credits = excluded.volume_credits,
+            story_arc_credits = excluded.story_arc_credits,
+            movies = excluded.movies
+        `).run(
+          locationId, jsonify(location.name), jsonify(location.aliases),
+          jsonify(location.deck), jsonify(location.description),
+          jsonify(location.start_year),
+          jsonify(location.date_added), jsonify(location.date_last_updated),
+          imageUrl, location.site_detail_url, firstAppearedId,
+          jsonify(location.count_of_issue_appearances),
+          jsonify(location.issue_credits), jsonify(location.volume_credits),
+          jsonify(location.story_arc_credits), jsonify(location.movies)
+        );
+
+        if (exists) this.stats.locations_updated++;
+        else this.stats.locations_added++;
+      }
+      this.conn.exec("COMMIT");
+
+      const total = data.number_of_total_results || 0;
+      this.log(`  Processed ${offset + results.length}/${total} locations`);
+
+      if (results.length < limit) break;
+      offset += limit;
+    }
+
+    this.setEndpointLastSync("locations", endDate);
+  }
+
+  // SRV-3: single-phase list-paging sync (the teams/publishers pattern).
+  // Powers have no deck, appearance count, or first_appeared_in_issue.
+  async syncPowers(startDate, endDate, full = false) {
+    this.log(`\n--- Syncing Powers ---${full ? " (FULL)" : ""}`);
+    if (!this.conn) return;
+
+    let offset = 0;
+    const limit = 100;
+
+    while (true) {
+      const params = {
+        field_list: "id,name,aliases,description,date_added,date_last_updated," +
+          "image,site_detail_url,characters",
+        offset, limit
+      };
+      if (!full) params.filter = `date_last_updated:${startDate}|${endDate}`;
+      params.sort = "date_last_updated:asc";
+
+      const data = await this.apiCall("powers/", params);
+      if (!data) throw new Error("API call failed for powers");
+
+      const results = data.results || [];
+      if (results.length === 0) break;
+
+      this.conn.exec("BEGIN");
+      for (const power of results) {
+        const powerId = power.id;
+        if (!powerId) continue;
+
+        const image = power.image || null;
+        const imageUrl = image ? image.original_url : null;
+        const exists = this.conn.prepare("SELECT id FROM cv_power WHERE id = ?").get(powerId);
+
+        this.conn.prepare(`
+          INSERT INTO cv_power
+            (id, name, aliases, description, date_added, date_last_updated,
+             image_url, site_detail_url, characters)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            aliases = excluded.aliases,
+            description = excluded.description,
+            date_added = excluded.date_added,
+            date_last_updated = excluded.date_last_updated,
+            image_url = excluded.image_url,
+            site_detail_url = excluded.site_detail_url,
+            characters = excluded.characters
+        `).run(
+          powerId, jsonify(power.name), jsonify(power.aliases),
+          jsonify(power.description),
+          jsonify(power.date_added), jsonify(power.date_last_updated),
+          imageUrl, power.site_detail_url, jsonify(power.characters)
+        );
+
+        if (exists) this.stats.powers_updated++;
+        else this.stats.powers_added++;
+      }
+      this.conn.exec("COMMIT");
+
+      const total = data.number_of_total_results || 0;
+      this.log(`  Processed ${offset + results.length}/${total} powers`);
+
+      if (results.length < limit) break;
+      offset += limit;
+    }
+
+    this.setEndpointLastSync("powers", endDate);
+  }
+
   // Fetch a single concept's detail from the live API (mirrors fetchVolumeDetails).
   // The detail call returns the three relationship collections the list endpoint
   // silently drops, plus the same scalar fields the list call requests.
@@ -1755,7 +2066,7 @@ class ComicVineUpdater {
     this.log("SYNC COMPLETE", { force: true });
     this.log("=".repeat(50), { force: true });
     this.log(`API calls made:     ${s.api_calls}`, { force: true });
-    // UPD-12: report only the resources this run synced (all seven by default).
+    // UPD-12: report only the resources this run synced (all ten by default).
     // Labels are padded to a fixed width so the counts stay column-aligned.
     for (const r of this.selectedResources()) {
       const added = `${r.statsLabel} added:`.padEnd(20) + s[`${r.stats}_added`];
@@ -1963,7 +2274,7 @@ function cleanupOldDatabases(dbDir, keepDays = 7, verbose = true) {
 
 // ─── Full-Sync Confirmation (UPD-2) ─────────────────────────────────────────
 
-// A full sync issues one unfiltered call per page across all seven endpoints.
+// A full sync issues one unfiltered call per page across all ten endpoints.
 // With the live API's ~1.1M issues and the 200-calls/hour rate limit, a full
 // pass cannot be parallelized and takes on the order of weeks of continuous
 // calls to complete. Gate it behind an explicit confirmation so it is never
@@ -1975,13 +2286,13 @@ async function confirmFullSync({ interactive, yes, resources = null }) {
   // sync is trivial, but a full `issues` sync is still ~1.1M detail calls.
   const scope = resources
     ? resources.map((r) => r.label).join(", ")
-    : "all seven endpoints";
+    : "all ten endpoints";
   const calls = resources
     ? `one unfiltered call per page for ${scope}` +
       (resources.some((r) => r.name === "issues")
         ? " — the issues endpoint alone is ~1.1M detail calls"
         : "")
-    : "~1.1 million (one per issue detail, plus per-page calls for the other five endpoints)";
+    : "~1.1 million (one per issue detail, plus per-page calls for the other eight endpoints)";
   const line = "=".repeat(50);
   console.error(`\n${line}`);
   console.error("FULL SYNC WARNING");
@@ -2072,8 +2383,9 @@ Options:
                        comma-separated. Accepts the endpoint name, the cv_*
                        table name, or the singular (e.g. issue / issues /
                        cv_issue all mean issues). Valid: publishers, people,
-                       volumes, issues, teams, storyarcs, concepts.
-                       Default: all seven.
+                       volumes, issues, teams, storyarcs, concepts,
+                       characters, locations, powers.
+                       Default: all ten.
   --non-interactive    Run without prompts (for cron)
   --quiet              Reduce output verbosity
   --no-copy            Don't create dated copy, update in place

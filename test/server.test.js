@@ -1478,8 +1478,8 @@ test("buildApiDetailUrl derives the canonical api_detail_url (SRV-21)", () => {
   assert.equal(buildApiDetailUrl("issue", 2797), "https://comicvine.gamespot.com/api/issue/4000-2797/");
   assert.equal(buildApiDetailUrl("volume", 7300), "https://comicvine.gamespot.com/api/volume/4050-7300/");
   assert.equal(buildApiDetailUrl("person", 1251), "https://comicvine.gamespot.com/api/person/4040-1251/");
-  // A resource with no verified domain prefix cannot be derived.
-  assert.equal(buildApiDetailUrl("character", 17), null);
+  // SRV-3: character now has a verified domain prefix (4005).
+  assert.equal(buildApiDetailUrl("character", 17), "https://comicvine.gamespot.com/api/character/4005-17/");
 });
 
 test("parseBoolFlag treats 0/false/no/off as off and 1/true/yes/on as on (SRV-25)", () => {
@@ -1860,3 +1860,177 @@ test("emits every stored issue field (SRV-19)", async () => {
     rmSync(srv19Directory, { recursive: true, force: true });
   }
 });
+
+// ─── SRV-3: character, location, power ───────────────────────────────────────
+
+test("SRV-3: serves the three new resources (list, detail, search, sort, field_list)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-srv3-test-"));
+  const dbPath = path.join(directory, "srv3.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, name TEXT, issue_number TEXT)");
+  db.exec("CREATE TABLE cv_character (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, real_name TEXT, birth TEXT, gender INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER, count_of_issue_appearances INTEGER, publisher TEXT, origin TEXT, teams TEXT, movies TEXT, powers TEXT, creators TEXT, issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, issues_died_in TEXT, character_enemies TEXT, character_friends TEXT, team_enemies TEXT, team_friends TEXT)");
+  db.exec("CREATE TABLE cv_location (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, start_year TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER, count_of_issue_appearances INTEGER, issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, movies TEXT)");
+  db.exec("CREATE TABLE cv_power (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, characters TEXT)");
+  db.prepare("INSERT INTO cv_issue (id, name, issue_number) VALUES (?, ?, ?)").run(4001, "Test Series #1", "1");
+  db.prepare("INSERT INTO cv_character (id, name, aliases, real_name, gender, deck, description, date_added, date_last_updated, image_url, site_detail_url, first_appeared_in_issue_id, count_of_issue_appearances, publisher, origin, teams, powers, issues_died_in, character_enemies, character_friends, team_enemies, team_friends, movies, creators, issue_credits, volume_credits, story_arc_credits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(1253, "Lightning Lad", "Garth Ranzz", "Garth Ranzz", 1, "A Legionnaire", "A lightning controller", "2008-06-06 11:00:00", "2026-01-01 00:00:00", "https://example.test/lad.jpg", "https://example.test/lad/", 4001, 180, J({ id: 31, name: "Marvel" }), J({ id: 3, name: "Alien" }), J([{ id: 19241, name: "Legion of Super-Heroes" }]), J([{ id: 1, name: "Flight" }]), J([]), J([]), J([]), J([]), J([]), J([]), J([]), J([{ id: 4001, name: "Test Series #1" }]), J([]), J([]));
+  db.prepare("INSERT INTO cv_character (id, name, date_added) VALUES (?, ?, ?)")
+    .run(1254, "Second Lad", "1899-01-01 00:00:00");
+  db.prepare("INSERT INTO cv_location (id, name, aliases, deck, description, start_year, date_added, date_last_updated, image_url, site_detail_url, first_appeared_in_issue_id, count_of_issue_appearances, issue_credits, movies) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(55940, "Savage Land", "Wildes Land", "A prehistoric land", "Hidden in Antarctica", "1941", "2008-06-06 11:00:00", "2026-01-01 00:00:00", "https://example.test/land.jpg", "https://example.test/land/", 4001, 12, J([{ id: 4001, name: "Test Series #1" }]), J([]));
+  db.prepare("INSERT INTO cv_location (id, name, date_added) VALUES (?, ?, ?)")
+    .run(55941, "Second Land", "1899-01-01 00:00:00");
+  db.prepare("INSERT INTO cv_power (id, name, aliases, description, date_added, date_last_updated, image_url, site_detail_url, characters) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(1, "Flight", "Flying", "The ability to fly", "2008-06-06 11:00:00", "2026-01-01 00:00:00", "https://example.test/flight.jpg", "https://example.test/flight/", J([{ id: 1253, name: "Lightning Lad" }]));
+  db.prepare("INSERT INTO cv_power (id, name, date_added) VALUES (?, ?, ?)")
+    .run(2, "Super Strength", "1899-01-01 00:00:00");
+  db.close();
+
+  const server = createApiServer(dbPath, () => {});
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    // Character list: default id ordering, full shape.
+    const list = await (await fetch(`${url}/api/characters?format=json`)).json();
+    assert.equal(list.status_code, 1);
+    assert.equal(list.number_of_total_results, 2);
+    assert.deepEqual(list.results.map((r) => r.id), [1253, 1254]);
+    const lad = list.results[0];
+    // The api_detail_url is derived from the id (domain prefix 4005).
+    assert.equal(lad.api_detail_url, "https://comicvine.gamespot.com/api/character/4005-1253/");
+    // The internal image_url column does not leak; image is built from it.
+    assert.equal(Object.hasOwn(lad, "image_url"), false);
+    assert.equal(lad.image.original_url, "https://example.test/lad.jpg");
+    // The appearance count uses the live API's corrected spelling for characters.
+    assert.equal(lad.count_of_issue_appearances, 180);
+    // first_appeared_in_issue is derived from the stored issue id (the UPD-15
+    // pattern): api_detail_url via buildApiDetailUrl, name/issue_number from
+    // the LEFT JOIN cv_issue.
+    assert.deepEqual(lad.first_appeared_in_issue, {
+      api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_issue/4000-4001/",
+      id: 4001,
+      name: "Test Series #1",
+      issue_number: "1"
+    });
+    // The scalar references parse from the JSON columns.
+    assert.deepEqual(lad.publisher, { id: 31, name: "Marvel" });
+    assert.deepEqual(lad.origin, { id: 3, name: "Alien" });
+    // The collections parse from the JSON columns; missing/empty emit [].
+    assert.deepEqual(lad.teams, [{ id: 19241, name: "Legion of Super-Heroes" }]);
+    assert.deepEqual(lad.powers, [{ id: 1, name: "Flight" }]);
+    // The collections parse from the JSON columns; the empty ones emit [].
+    assert.deepEqual(lad.issues_died_in, []);
+    assert.deepEqual(lad.volume_credits, []);
+    assert.deepEqual(lad.story_arc_credits, []);
+    assert.deepEqual(lad.issue_credits, [{ id: 4001, name: "Test Series #1" }]);
+    // The second character's NULL columns emit null / [] (the live API shape).
+    const second = list.results[1];
+    assert.equal(second.publisher, null);
+    assert.equal(second.first_appeared_in_issue, null);
+    assert.deepEqual(second.teams, []);
+    assert.equal(second.image, null);
+
+    // Character detail with field_list projection.
+    const projected = await (await fetch(`${url}/api/character/4005-1253/?field_list=id,name,real_name,gender,count_of_issue_appearances`)).json();
+    assert.deepEqual(projected.results, {
+      id: 1253,
+      name: "Lightning Lad",
+      real_name: "Garth Ranzz",
+      gender: 1,
+      count_of_issue_appearances: 180
+    });
+
+    // Character sort on a stored column.
+    const sorted = await (await fetch(`${url}/api/characters?sort=count_of_issue_appearances:desc&limit=1&field_list=id`)).json();
+    assert.deepEqual(sorted.results, [{ id: 1253 }]);
+
+    // Character search (LIKE fallback: no FTS table in this fixture).
+    const search = await (await fetch(`${url}/api/search/?query=Lightning&resources=character`)).json();
+    assert.equal(search.number_of_total_results, 1);
+    assert.equal(search.results[0].id, 1253);
+    assert.equal(search.results[0].resource_type, "character");
+
+    // Location list: full shape.
+    const locList = await (await fetch(`${url}/api/locations?format=json`)).json();
+    assert.equal(locList.number_of_total_results, 2);
+    const land = locList.results[0];
+    assert.equal(land.api_detail_url, "https://comicvine.gamespot.com/api/location/4020-55940/");
+    assert.equal(land.start_year, "1941");
+    assert.equal(land.count_of_issue_appearances, 12);
+    assert.deepEqual(land.first_appeared_in_issue, {
+      api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_issue/4000-4001/",
+      id: 4001,
+      name: "Test Series #1",
+      issue_number: "1"
+    });
+    assert.deepEqual(land.issue_credits, [{ id: 4001, name: "Test Series #1" }]);
+    assert.deepEqual(land.movies, []);
+
+    // Location detail + sort + search.
+    const locDetail = await (await fetch(`${url}/api/location/4020-55940/?field_list=id,name,start_year,deck`)).json();
+    assert.deepEqual(locDetail.results, {
+      id: 55940,
+      name: "Savage Land",
+      start_year: "1941",
+      deck: "A prehistoric land"
+    });
+    const locSorted = await (await fetch(`${url}/api/locations?sort=count_of_issue_appearances:desc&limit=1&field_list=id`)).json();
+    assert.deepEqual(locSorted.results, [{ id: 55940 }]);
+    const locSearch = await (await fetch(`${url}/api/search/?query=Savage&resources=location`)).json();
+    assert.equal(locSearch.number_of_total_results, 1);
+    assert.equal(locSearch.results[0].id, 55940);
+
+    // Power list: full shape (no deck / count / first_appeared_in_issue).
+    const powList = await (await fetch(`${url}/api/powers?format=json`)).json();
+    assert.equal(powList.number_of_total_results, 2);
+    const flight = powList.results[0];
+    assert.equal(flight.api_detail_url, "https://comicvine.gamespot.com/api/power/4035-1/");
+    assert.equal(Object.hasOwn(flight, "deck"), false);
+    assert.equal(Object.hasOwn(flight, "count_of_issue_appearances"), false);
+    assert.equal(Object.hasOwn(flight, "first_appeared_in_issue"), false);
+    assert.deepEqual(flight.characters, [{ id: 1253, name: "Lightning Lad" }]);
+    assert.equal(flight.image.original_url, "https://example.test/flight.jpg");
+
+    // Power detail + sort + search.
+    const powDetail = await (await fetch(`${url}/api/power/4035-1/?field_list=id,name,aliases,description`)).json();
+    assert.deepEqual(powDetail.results, { id: 1, name: "Flight", aliases: "Flying", description: "The ability to fly" });
+    const powSorted = await (await fetch(`${url}/api/powers?sort=name:asc&limit=1&field_list=id`)).json();
+    assert.deepEqual(powSorted.results, [{ id: 1 }]);
+    const powSearch = await (await fetch(`${url}/api/search/?query=Flight&resources=power`)).json();
+    assert.equal(powSearch.number_of_total_results, 1);
+    assert.equal(powSearch.results[0].id, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("SRV-3: a resource without its table still 404s (object remains open)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-srv3-404-test-"));
+  const dbPath = path.join(directory, "srv3-404.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec("CREATE TABLE cv_character (id INTEGER PRIMARY KEY, name TEXT)");
+  db.prepare("INSERT INTO cv_character (id, name) VALUES (?, ?)").run(1, "Some Character");
+  db.close();
+
+  const server = createApiServer(dbPath, () => {});
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    // The character table exists, so its endpoints are configured.
+    const chars = await fetch(`${url}/api/characters`);
+    assert.equal(chars.status, 200);
+    // The object / location / power tables are absent, so their endpoints 404.
+    for (const resource of ["objects", "locations", "powers"]) {
+      const res = await fetch(`${url}/api/${resource}`);
+      assert.equal(res.status, 404, `${resource} should 404`);
+      assert.match((await res.json()).error, /not available/i);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
