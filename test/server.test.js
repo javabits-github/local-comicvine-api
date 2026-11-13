@@ -1351,6 +1351,42 @@ test("serves a status endpoint with table counts, sync metadata, and request sta
   }
 });
 
+test("status endpoint excludes FTS5 virtual and shadow tables (SRV-29)", async () => {
+  // A separate database: the shared fixture must not gain FTS tables, because
+  // the server auto-enables FTS-backed search for any resource whose FTS table
+  // exists and has rows, which would change the other tests' behavior.
+  const ftsDbPath = path.join(directory, "fts-status.db");
+  const ftsDb = new DatabaseSync(ftsDbPath);
+  ftsDb.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT)");
+  ftsDb.prepare("INSERT INTO cv_volume (id, name, deck) VALUES (?, ?, ?)").run(1, "Witchblade", "A supernatural series.");
+  ftsDb.prepare("INSERT INTO cv_volume (id, name, deck) VALUES (?, ?, ?)").run(2, "Dune", "A desert epic.");
+  // An external-content FTS5 index, as the updater creates (SRV-5). Besides the
+  // virtual table itself, FTS5 materializes four shadow tables:
+  // cv_volume_fts_config, cv_volume_fts_data, cv_volume_fts_docsize, cv_volume_fts_idx.
+  ftsDb.exec("CREATE VIRTUAL TABLE cv_volume_fts USING fts5(name, deck, content='cv_volume', content_rowid='id')");
+  ftsDb.exec("INSERT INTO cv_volume_fts(rowid, name, deck) VALUES (1, 'Witchblade', 'A supernatural series.')");
+  ftsDb.exec("INSERT INTO cv_volume_fts(rowid, name, deck) VALUES (2, 'Dune', 'A desert epic.')");
+  ftsDb.close();
+
+  const statusServer = createApiServer(ftsDbPath, () => {});
+  await new Promise((resolve) => statusServer.listen(0, "127.0.0.1", resolve));
+  const statusUrl = `http://127.0.0.1:${statusServer.address().port}`;
+
+  try {
+    const response = await fetch(`${statusUrl}/api/status/`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+
+    // Only the real data table is reported; the FTS5 virtual table and its four
+    // shadow tables are all excluded.
+    assert.deepEqual(Object.keys(body.tables).sort(), ["cv_volume"]);
+    assert.equal(body.tables.cv_volume, 2);
+  } finally {
+    await new Promise((resolve) => statusServer.close(resolve));
+    rmSync(ftsDbPath, { force: true });
+  }
+});
+
 test("diffs detail responses against the live API in validation mode", async () => {
   // The live fetch is injected so the test never touches the network. The fake
   // returns a live entity that matches the local volume 7300 except that its

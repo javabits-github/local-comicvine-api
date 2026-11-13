@@ -1265,7 +1265,7 @@ function createApiServer(
       let tables = {};
       try {
         const rows = wrappedDatabase.prepare(
-          `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cv\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%\\_fts' ESCAPE '\\' ORDER BY name`
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cv\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%\\_fts%' ESCAPE '\\' ORDER BY name`
         ).all();
         for (const row of rows) {
           tables[row.name] = wrappedDatabase.prepare(`SELECT COUNT(*) AS count FROM ${row.name}`).get().count;
