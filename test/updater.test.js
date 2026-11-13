@@ -256,12 +256,18 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.equal(concept.count_of_issue_appearances, 9);
   assert.equal(concept.start_year, "2005");
   assert.equal(concept.image_url, "https://example.com/concept.png");
-  const conceptFirstAppeared = JSON.parse(concept.first_appeared_in_issue);
-  assert.equal(conceptFirstAppeared.id, 4001);
+  // UPD-15: first_appeared_in_issue is stored as the issue id, not a JSON blob
+  // (the server derives the object from the id). The mock detail returns
+  // first_appeared_in_issue: {id: 4001, ...}, so the upsert stores 4001.
+  assert.equal(concept.first_appeared_in_issue_id, 4001);
   // UPD-13: runSync's migration drops the api_detail_url column the server now
   // derives from the id (the fixture created it; the live value is canonical).
+  // UPD-15: the same migration drops the first_appeared_in_issue JSON column and
+  // adds first_appeared_in_issue_id (the fixture created the old JSON column).
   const conceptCols = db.prepare("PRAGMA table_info(cv_concept)").all().map((c) => c.name);
   assert.ok(!conceptCols.includes("api_detail_url"), `api_detail_url should be dropped, got ${conceptCols.join(", ")}`);
+  assert.ok(!conceptCols.includes("first_appeared_in_issue"), `first_appeared_in_issue JSON column should be dropped, got ${conceptCols.join(", ")}`);
+  assert.ok(conceptCols.includes("first_appeared_in_issue_id"), `first_appeared_in_issue_id should exist, got ${conceptCols.join(", ")}`);
 
   // UPD-14: the three relationship collections are written as cv_concept_credit
   // join rows (issue_credits x2, movies x1, volume_credits x1 = 4 rows). The

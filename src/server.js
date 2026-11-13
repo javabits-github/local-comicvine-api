@@ -432,10 +432,27 @@ function buildResult(row, singular) {
   // stored column keeps the corrected spelling (same as person SRV-20 / team SRV-22).
   if (has("count_of_issue_appearances")) result.count_of_isssue_appearances = row.count_of_issue_appearances;
   if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
-  // SRV-26: the live API emits null (not an absent key) when the stored
-  // first_appeared_in_issue is NULL; parseJsonColumn returns undefined for NULL,
-  // so coalesce to null to keep the key in the serialized output.
-  if (has("first_appeared_in_issue")) result.first_appeared_in_issue = parseJsonColumn(row.first_appeared_in_issue) ?? null;
+  // UPD-15: first_appeared_in_issue is derived from the stored issue id. The
+  // api_detail_url uses the special first_appeared_in_issue/4000-<id>/ form
+  // (buildApiDetailUrl); name/issue_number come from the LEFT JOIN cv_issue added
+  // in buildResourceConfig (null when the issue isn't in the subset DB, the SRV-6c
+  // degradation). A NULL id emits null, preserving SRV-26's ?? null coalesce (the
+  // live API emits null, not an absent key). The key order is the live API's current
+  // canonical order (api_detail_url first). The legacy JSON-column path remains the
+  // fallback for pre-UPD-15 databases and test fixtures without the id column.
+  if (has("first_appeared_in_issue_id")) {
+    const issueId = row.first_appeared_in_issue_id;
+    result.first_appeared_in_issue = (issueId === null || issueId === undefined)
+      ? null
+      : {
+        api_detail_url: buildApiDetailUrl("first_appeared_in_issue", issueId),
+        id: issueId,
+        name: row.first_appeared_issue_name ?? null,
+        issue_number: row.first_appeared_issue_number ?? null
+      };
+  } else if (has("first_appeared_in_issue")) {
+    result.first_appeared_in_issue = parseJsonColumn(row.first_appeared_in_issue) ?? null;
+  }
   // SRV-26: the live API never returns null for the three collections (always an
   // array). The legacy path (no join table) emits [] for all three; buildConceptResult
   // overwrites them with the cv_concept_credit rows when the join table exists.
@@ -537,6 +554,15 @@ function buildResourceConfig(database, resource) {
   alias = "p";
   from = `${resource.table} ${alias}`;
   selectExtra = `${alias}.*`;
+  // UPD-15: resolve the first_appeared_in_issue reference's display fields
+  // (name/issue_number) from cv_issue via a LEFT JOIN, the issue branch's
+  // volume-join pattern. Added only when the id column exists and cv_issue is
+  // available; otherwise the reference's display fields degrade to null (the
+  // SRV-6c behavior for a ref whose row isn't in the subset DB).
+  if (singular === "concept" && has("first_appeared_in_issue_id") && tableColumns(database, "cv_issue").size > 0) {
+   from += " LEFT JOIN cv_issue i ON i.id = p.first_appeared_in_issue_id";
+   selectExtra += ", i.name AS first_appeared_issue_name, i.issue_number AS first_appeared_issue_number";
+  }
   // SRV-26: generate the three concept collections from the cv_concept_credit
   // join table once it exists (UPD-14); otherwise buildResult emits [] for all
   // three (the live API is never null). Same pattern as the volume join tables.

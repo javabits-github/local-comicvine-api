@@ -671,6 +671,65 @@ test("builds concept collections from the cv_concept_credit join (SRV-26)", asyn
   }
 });
 
+test("derives first_appeared_in_issue from the issue id (UPD-15)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-concept-fai-test-"));
+  const faiDatabasePath = path.join(directory, "concept-fai.db");
+  const faiDatabase = new DatabaseSync(faiDatabasePath);
+  // UPD-15: the new schema stores the issue id, not the JSON blob (no first_appeared_in_issue TEXT column).
+  faiDatabase.exec("CREATE TABLE cv_concept (id INTEGER PRIMARY KEY, name TEXT, first_appeared_in_issue_id INTEGER, count_of_issue_appearances INTEGER)");
+  // The referenced issue, so the LEFT JOIN resolves name/issue_number.
+  faiDatabase.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, name TEXT, issue_number TEXT)");
+  faiDatabase.prepare("INSERT INTO cv_issue (id, name, issue_number) VALUES (?, ?, ?)")
+      .run(4001, "Test Series #1", "1");
+  // A concept with a non-null first_appeared_in_issue_id.
+  faiDatabase.prepare("INSERT INTO cv_concept (id, name, first_appeared_in_issue_id, count_of_issue_appearances) VALUES (?, ?, ?, ?)")
+      .run(1, "Alternate Reality", 4001, 3643);
+  // A concept with a NULL first_appeared_in_issue_id (the live API emits null).
+  faiDatabase.prepare("INSERT INTO cv_concept (id, name, first_appeared_in_issue_id, count_of_issue_appearances) VALUES (?, ?, ?, ?)")
+      .run(2, "Null Concept", null, 3);
+  // A concept whose issue id is absent from cv_issue (the subset-DB degradation:
+  // the id is still emitted, the joined display fields are null — the SRV-6c behavior).
+  faiDatabase.prepare("INSERT INTO cv_concept (id, name, first_appeared_in_issue_id, count_of_issue_appearances) VALUES (?, ?, ?, ?)")
+      .run(3, "Missing Issue Concept", 999999, 1);
+  faiDatabase.close();
+
+  const faiServer = createApiServer(faiDatabasePath, () => {});
+  await new Promise((resolve) => faiServer.listen(0, "127.0.0.1", resolve));
+  const faiUrl = `http://127.0.0.1:${faiServer.address().port}`;
+
+  try {
+    // Non-null id → the full derived object. The api_detail_url uses the special
+    // first_appeared_in_issue/4000-<id>/ form; name/issue_number come from cv_issue.
+    const r1 = (await (await fetch(`${faiUrl}/api/concept/4015-1/`)).json()).results;
+    assert.deepEqual(r1.first_appeared_in_issue, {
+      api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_issue/4000-4001/",
+      id: 4001,
+      name: "Test Series #1",
+      issue_number: "1"
+    });
+    // The key order is the live API's current canonical order (api_detail_url first).
+    assert.deepEqual(Object.keys(r1.first_appeared_in_issue), ["api_detail_url", "id", "name", "issue_number"]);
+
+    // NULL id → null (the live API emits null, not an absent key).
+    const r2 = (await (await fetch(`${faiUrl}/api/concept/4015-2/`)).json()).results;
+    assert.equal(Object.hasOwn(r2, "first_appeared_in_issue"), true);
+    assert.equal(r2.first_appeared_in_issue, null);
+
+    // Id present but the issue row absent from the subset DB → the id is emitted
+    // with null display fields (the SRV-6c degradation).
+    const r3 = (await (await fetch(`${faiUrl}/api/concept/4015-3/`)).json()).results;
+    assert.deepEqual(r3.first_appeared_in_issue, {
+      api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_issue/4000-999999/",
+      id: 999999,
+      name: null,
+      issue_number: null
+    });
+  } finally {
+    await new Promise((resolve) => faiServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("supports people fields, sorting, pagination, and filters", async () => {
   const response = await fetch(`${baseUrl}/api/people?format=json&sort=name:desc&limit=1&field_list=id,name,birth,death,country,gender,hometown,email,website`);
   const body = await response.json();

@@ -15,7 +15,12 @@ const DOMAIN_PREFIXES = {
   team: "4060",
   story_arc: "4045",
   publisher: "4010",
-  concept: "4015"
+  concept: "4015",
+  // UPD-15: the first_appeared_in_issue reference's api_detail_url uses the
+  // resource-type segment `first_appeared_in_issue` (not `issue`) with the same
+  // 4000 numeric prefix — …/api/first_appeared_in_issue/4000-<id>/. Verified
+  // against the verbatim rawapi dump: buildApiDetailUrl reproduces the live URL.
+  first_appeared_in_issue: "4000"
 };
 
 // SRV-21: the canonical api_detail_url for an entity: base URL + resource type +

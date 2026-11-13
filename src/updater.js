@@ -326,7 +326,7 @@ class ComicVineUpdater {
       CREATE TABLE IF NOT EXISTS cv_concept (
         id INTEGER PRIMARY KEY, name TEXT, aliases TEXT,
         deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
-        image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT,
+        image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER,
         count_of_issue_appearances INTEGER, start_year TEXT
       )
     `);
@@ -340,6 +340,59 @@ class ComicVineUpdater {
         this.conn.exec("ALTER TABLE cv_concept DROP COLUMN api_detail_url");
       } catch (e) {
         this.log(`  Warning: Could not drop cv_concept.api_detail_url: ${e.message}`);
+      }
+    }
+    // UPD-15: store first_appeared_in_issue as the issue id, not a JSON blob. The
+    // object is fully determined by the id, so the server derives it (api_detail_url
+    // via buildApiDetailUrl, name/issue_number via a LEFT JOIN cv_issue). Add the id
+    // column to pre-UPD-15 databases, backfill it from the legacy JSON column, then
+    // drop that column. Idempotent: a fresh table already has the id column and no
+    // JSON column, so both blocks are no-ops.
+    if (!conceptCols.includes("first_appeared_in_issue_id")) {
+      this.log("  Adding first_appeared_in_issue_id column to cv_concept...");
+      try {
+        this.conn.exec("ALTER TABLE cv_concept ADD COLUMN first_appeared_in_issue_id INTEGER");
+      } catch (e) {
+        this.log(`  Warning: Could not add first_appeared_in_issue_id: ${e.message}`);
+      }
+    }
+    if (conceptCols.includes("first_appeared_in_issue")) {
+      this.log("  Backfilling cv_concept.first_appeared_in_issue_id from the JSON column...");
+      let backfillOk = true;
+      try {
+        this.conn.exec("BEGIN");
+        const pending = this.conn.prepare(
+          "SELECT id, first_appeared_in_issue FROM cv_concept " +
+          "WHERE first_appeared_in_issue IS NOT NULL AND first_appeared_in_issue_id IS NULL"
+        ).all();
+        const update = this.conn.prepare(
+          "UPDATE cv_concept SET first_appeared_in_issue_id = ? WHERE id = ?"
+        );
+        let filled = 0;
+        for (const row of pending) {
+          let parsed;
+          try { parsed = JSON.parse(row.first_appeared_in_issue); } catch { continue; }
+          const issueId = parsed && parsed.id != null ? parsed.id : null;
+          if (issueId != null) { update.run(issueId, row.id); filled++; }
+        }
+        this.conn.exec("COMMIT");
+        this.log(`  Backfilled ${filled} first_appeared_in_issue_id values.`);
+      } catch (e) {
+        try { this.conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
+        backfillOk = false;
+        this.log(`  Warning: first_appeared_in_issue_id backfill failed: ${e.message}`);
+      }
+      // Only drop the JSON column once the id is safely backfilled; otherwise keep
+      // it so no data is lost (the server still reads it as a fallback).
+      if (backfillOk) {
+        this.log("  Dropping cv_concept.first_appeared_in_issue (now derived from the id)...");
+        try {
+          this.conn.exec("ALTER TABLE cv_concept DROP COLUMN first_appeared_in_issue");
+        } catch (e) {
+          this.log(`  Warning: Could not drop cv_concept.first_appeared_in_issue: ${e.message}`);
+        }
+      } else {
+        this.log("  Keeping cv_concept.first_appeared_in_issue (backfill did not complete).");
       }
     }
     // Seed last_sync_date for new endpoints at the raw-dump snapshot date.
@@ -1449,9 +1502,9 @@ class ComicVineUpdater {
 
     const countOfIssueAppearances =
       conceptData.count_of_isssue_appearances || conceptData.count_of_issue_appearances;
-    const firstAppeared = conceptData.first_appeared_in_issue
-      ? JSON.stringify(conceptData.first_appeared_in_issue)
-      : null;
+    // UPD-15: store the issue id, not the JSON blob. The server derives the full
+    // object (api_detail_url + the issue's name/issue_number) from this id.
+    const firstAppearedId = conceptData.first_appeared_in_issue?.id ?? null;
 
     const insertCredit = this.conn.prepare(`
       INSERT INTO cv_concept_credit
@@ -1468,7 +1521,7 @@ class ComicVineUpdater {
         INSERT INTO cv_concept
           (id, name, aliases, deck, description,
            date_added, date_last_updated, image_url, site_detail_url,
-           first_appeared_in_issue, count_of_issue_appearances, start_year)
+           first_appeared_in_issue_id, count_of_issue_appearances, start_year)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
@@ -1479,14 +1532,14 @@ class ComicVineUpdater {
           date_last_updated = excluded.date_last_updated,
           image_url = excluded.image_url,
           site_detail_url = excluded.site_detail_url,
-          first_appeared_in_issue = COALESCE(excluded.first_appeared_in_issue, cv_concept.first_appeared_in_issue),
+          first_appeared_in_issue_id = COALESCE(excluded.first_appeared_in_issue_id, cv_concept.first_appeared_in_issue_id),
           count_of_issue_appearances = excluded.count_of_issue_appearances,
           start_year = excluded.start_year
       `).run(
         conceptId, jsonify(conceptData.name), jsonify(conceptData.aliases),
         jsonify(conceptData.deck), jsonify(conceptData.description),
         jsonify(conceptData.date_added), jsonify(conceptData.date_last_updated),
-        imageUrl, conceptData.site_detail_url, firstAppeared,
+        imageUrl, conceptData.site_detail_url, firstAppearedId,
         jsonify(countOfIssueAppearances), jsonify(conceptData.start_year)
       );
 
