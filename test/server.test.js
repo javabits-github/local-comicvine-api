@@ -208,7 +208,7 @@ test("builds volume first/last issue refs from the cv_issue join (SRV-6c)", asyn
   const joinDatabase = new DatabaseSync(joinDatabasePath);
   joinDatabase.exec("CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT)");
   joinDatabase.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, credits_presence INTEGER)");
-  joinDatabase.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, api_detail_url TEXT)");
+  joinDatabase.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, api_detail_url TEXT, site_detail_url TEXT)");
   joinDatabase.exec("CREATE TABLE cv_volume_credit (volume_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, count TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (volume_id, credit_type, position))");
   joinDatabase.exec("CREATE TABLE cv_volume_issue_ref (volume_id INTEGER NOT NULL, ref_type TEXT NOT NULL, issue_id INTEGER, key_order TEXT, PRIMARY KEY (volume_id, ref_type))");
   joinDatabase.prepare("INSERT INTO cv_volume (id, name, start_year, count_of_issues, credits_presence) VALUES (?, ?, ?, ?, ?)")
@@ -216,6 +216,12 @@ test("builds volume first/last issue refs from the cv_issue join (SRV-6c)", asyn
   // Issue 10 exists locally (resolves); issue 99 does not (dangling ref).
   joinDatabase.prepare("INSERT INTO cv_issue (id, volume_id, name, issue_number, api_detail_url) VALUES (?, ?, ?, ?, ?)")
       .run(10, 1, "Witchblade #1", "1", "https://example.test/issue/4000-10/");
+  // UPD-10: a second issue for the volume (inserted out of id order to prove the
+  // server sorts by id) plus a volume with no issues at all.
+  joinDatabase.prepare("INSERT INTO cv_issue (id, volume_id, name, issue_number, api_detail_url) VALUES (?, ?, ?, ?, ?)")
+      .run(12, 1, "Witchblade #2", "2", "https://example.test/issue/4000-12/");
+  joinDatabase.prepare("INSERT INTO cv_volume (id, name, credits_presence) VALUES (?, ?, ?)")
+      .run(2, "Empty Series", 0);
   // first_issue → 10 (resolves, id-first key order); last_issue → 99 (dangling).
   joinDatabase.prepare("INSERT INTO cv_volume_issue_ref (volume_id, ref_type, issue_id, key_order) VALUES (?, ?, ?, ?)")
       .run(1, "first", 10, JSON.stringify(["id", "name", "issue_number", "api_detail_url"]));
@@ -237,6 +243,17 @@ test("builds volume first/last issue refs from the cv_issue join (SRV-6c)", asyn
     });
     // Dangling ref: the id is still emitted, joined fields are null.
     assert.deepEqual(result.last_issue, { id: 99, name: null, issue_number: null, api_detail_url: null });
+
+    // UPD-10: issues is derived from cv_issue (ordered by id ascending, the live
+    // key order, api_detail_url derived from the id).
+    assert.deepEqual(result.issues, [
+      { id: 10, name: "Witchblade #1", issue_number: "1", api_detail_url: "https://comicvine.gamespot.com/api/issue/4000-10/", site_detail_url: null },
+      { id: 12, name: "Witchblade #2", issue_number: "2", api_detail_url: "https://comicvine.gamespot.com/api/issue/4000-12/", site_detail_url: null }
+    ]);
+
+    // A volume with no locally-synced issues emits [] (the live API never returns null).
+    const empty = await (await fetch(`${joinUrl}/api/volume/4050-2/`)).json();
+    assert.deepEqual(empty.results.issues, []);
   } finally {
     await new Promise((resolve) => joinServer.close(resolve));
     rmSync(directory, { recursive: true, force: true });

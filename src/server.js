@@ -244,6 +244,24 @@ function buildVolumeResult(row, database) {
     result[field] = found ? issueRefRowToObject(found) : undefined;
   }
 
+  // UPD-10: the live API returns the volume's issues as an array of
+  // {id, name, issue_number, api_detail_url, site_detail_url} ordered by issue
+  // id. Derive it from cv_issue (idx_issue_volume) instead of storing a denormalized
+  // copy: the updater's volume field_list never requests it, and cv_volume has no
+  // such column. api_detail_url is derived from the id (SRV-21 pattern); the live
+  // API never returns null for this collection, so a volume with no locally-synced
+  // issues emits [] (subset-DB degradation, the SRV-6c convention).
+  const issueRows = database
+    .prepare("SELECT id, name, issue_number, site_detail_url FROM cv_issue WHERE volume_id = ? ORDER BY id")
+    .all(row.id);
+  result.issues = issueRows.map((issue) => ({
+    id: issue.id,
+    name: issue.name,
+    issue_number: issue.issue_number,
+    api_detail_url: buildApiDetailUrl("issue", issue.id),
+    site_detail_url: issue.site_detail_url
+  }));
+
   return result;
 }
 

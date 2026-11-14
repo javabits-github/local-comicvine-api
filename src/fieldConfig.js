@@ -41,11 +41,11 @@ function buildApiDetailUrl(singular, id) {
 const volumeFields = new Set([
   "aliases", "api_detail_url", "count_of_issues", "date_added", "date_last_updated",
   "character_credits", "concept_credits", "deck", "description", "first_issue", "id",
-  "image", "last_issue", "location_credits", "name", "object_credits", "person_credits",
-  "publisher", "site_detail_url", "start_year", "team_credits"
+  "image", "issues", "last_issue", "location_credits", "name", "object_credits",
+  "person_credits", "publisher", "site_detail_url", "start_year", "team_credits"
 ]);
 const volumeCreditFields = new Set([
-  "character_credits", "concept_credits", "location_credits", "object_credits",
+  "character_credits", "concept_credits", "issues", "location_credits", "object_credits",
   "person_credits", "team_credits"
 ]);
 // SRV-22: the live API emits the team's appearance count and disbanded collection
