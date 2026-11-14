@@ -18,7 +18,8 @@ database.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliase
 database.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT)");
 database.exec("CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_team_members INTEGER, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT)");
 database.exec("CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, count_of_issue_appearances INTEGER, date_added TEXT, first_appeared_in_issue TEXT, publisher TEXT, site_detail_url TEXT, issues TEXT, movies TEXT)");
-database.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT, birth TEXT, count_of_issue_appearances INTEGER, country TEXT, date_added TEXT, date_last_updated TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, image_url TEXT, created_characters TEXT, issue_credits TEXT, story_arc_credits TEXT, volume_credits TEXT, site_detail_url TEXT)");
+// UPD-11: no api_detail_url column — the server derives it from the id (like team/concept).
+database.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, birth TEXT, count_of_issue_appearances INTEGER, country TEXT, date_added TEXT, date_last_updated TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, image_url TEXT, created_characters TEXT, issue_credits TEXT, story_arc_credits TEXT, volume_credits TEXT, site_detail_url TEXT)");
 // UPD-13: no api_detail_url column — the server derives it from the id (like team).
 database.exec("CREATE TABLE cv_concept (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, count_of_issue_appearances INTEGER, start_year TEXT)");
 database.prepare("INSERT INTO cv_publisher (id, name, site_detail_url, aliases, date_added, location_address, location_city, location_state, characters, story_arcs, teams, volumes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -41,8 +42,8 @@ database.prepare("INSERT INTO cv_storyarc (id, name, aliases, count_of_issue_app
     .run(3000, "Secret Wars", "Secret Wars (1984)", 12, "2020-04-15 10:00:00", J({ id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }), J({ id: 31, name: "Marvel" }), "https://example.test/secret-wars/", J([{ id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }]), J([]));
 database.prepare("INSERT INTO cv_storyarc (id, name, date_added) VALUES (?, ?, ?)")
     .run(3001, "Civil War", "1899-01-01 00:00:00");
-database.prepare("INSERT INTO cv_person (id, name, aliases, api_detail_url, birth, count_of_issue_appearances, country, date_added, date_last_updated, death, gender, hometown, email, website, image_url, created_characters, issue_credits, story_arc_credits, volume_credits, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(1251, "Barry Kitson", "Barry Kitson (artist)", "https://comicvine.gamespot.com/api/person/4040-1251/", null, 180, "United Kingdom", "2020-04-15 10:00:00", "2021-05-01 08:30:00", null, "1", "Leicester", "barry@example.test", "https://example.test/barry", "https://example.test/barry.jpg", J([{ id: 9081, name: "The Amazing Bug" }]), J([]), J([]), J([{ id: 120, name: "Sample Volume" }]), "https://example.test/barry-kitson/");
+database.prepare("INSERT INTO cv_person (id, name, aliases, birth, count_of_issue_appearances, country, date_added, date_last_updated, death, gender, hometown, email, website, image_url, created_characters, issue_credits, story_arc_credits, volume_credits, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(1251, "Barry Kitson", "Barry Kitson (artist)", null, 180, "United Kingdom", "2020-04-15 10:00:00", "2021-05-01 08:30:00", null, "1", "Leicester", "barry@example.test", "https://example.test/barry", "https://example.test/barry.jpg", J([{ id: 9081, name: "The Amazing Bug" }]), J([]), J([]), J([{ id: 120, name: "Sample Volume" }]), "https://example.test/barry-kitson/");
 database.prepare("INSERT INTO cv_person (id, name, date_added) VALUES (?, ?, ?)")
     .run(1252, "Alex Ross", "1899-01-01 00:00:00");
 database.prepare("INSERT INTO cv_concept (id, name, aliases, deck, description, date_added, date_last_updated, image_url, site_detail_url, first_appeared_in_issue, count_of_issue_appearances, start_year) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -237,12 +238,14 @@ test("builds volume first/last issue refs from the cv_issue join (SRV-6c)", asyn
     const detail = await (await fetch(`${joinUrl}/api/volume/4050-1/`)).json();
     const result = detail.results;
 
-    // Resolving ref: display fields come from the joined cv_issue row.
+    // Resolving ref: name/issue_number come from the joined cv_issue row; UPD-11:
+    // api_detail_url is derived from the issue id (the stored column is dropped).
     assert.deepEqual(result.first_issue, {
-      id: 10, name: "Witchblade #1", issue_number: "1", api_detail_url: "https://example.test/issue/4000-10/"
+      id: 10, name: "Witchblade #1", issue_number: "1", api_detail_url: "https://comicvine.gamespot.com/api/issue/4000-10/"
     });
-    // Dangling ref: the id is still emitted, joined fields are null.
-    assert.deepEqual(result.last_issue, { id: 99, name: null, issue_number: null, api_detail_url: null });
+    // Dangling ref: the id is still emitted, joined display fields are null, but
+    // api_detail_url is derived from the known id (the live API always emits it).
+    assert.deepEqual(result.last_issue, { id: 99, name: null, issue_number: null, api_detail_url: "https://comicvine.gamespot.com/api/issue/4000-99/" });
 
     // UPD-10: issues is derived from cv_issue (ordered by id ascending, the live
     // key order, api_detail_url derived from the id).
@@ -567,6 +570,30 @@ test("derives concept api_detail_url from the id (UPD-13)", async () => {
     id: 58852,
     name: "Digital Comic",
     api_detail_url: "https://comicvine.gamespot.com/api/concept/4015-58852/"
+  });
+});
+
+test("derives person/volume/issue api_detail_url from the id (UPD-11)", async () => {
+  // The live API always emits api_detail_url; the server derives it from the id
+  // (canonical base URL + domain prefix + id) — none of these tables has the column.
+  const person = await (await fetch(`${baseUrl}/api/person/4040-1251/?format=json`)).json();
+  assert.equal(person.results.api_detail_url, "https://comicvine.gamespot.com/api/person/4040-1251/");
+  assert.equal(person.results.name, "Barry Kitson");
+
+  const volume = await (await fetch(`${baseUrl}/api/volume/4050-7300/?format=json`)).json();
+  assert.equal(volume.results.api_detail_url, "https://comicvine.gamespot.com/api/volume/4050-7300/");
+  assert.equal(volume.results.name, "Witchblade");
+
+  const issue = await (await fetch(`${baseUrl}/api/issue/4000-42/?format=json`)).json();
+  assert.equal(issue.results.api_detail_url, "https://comicvine.gamespot.com/api/issue/4000-42/");
+  assert.equal(issue.results.name, "The Test Issue");
+
+  // field_list projection passes the derived value through.
+  const projected = await (await fetch(`${baseUrl}/api/volume/4050-7300/?format=json&field_list=id,name,api_detail_url`)).json();
+  assert.deepEqual(projected.results, {
+    id: 7300,
+    name: "Witchblade",
+    api_detail_url: "https://comicvine.gamespot.com/api/volume/4050-7300/"
   });
 });
 

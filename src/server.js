@@ -183,15 +183,16 @@ function creditRowToObject(row) {
 
 // Rebuild a first/last issue reference honoring the stored key order, so the two
 // historical key-order variants (id-first vs api_detail_url-first) serialize byte-for-byte.
-// The display fields (name/issue_number/api_detail_url) come from the joined cv_issue
-// row; the id is the ref's own issue_id (so a ref whose issue isn't synced locally still
-// emits its id, with the joined fields null).
+// The display fields (name/issue_number) come from the joined cv_issue row; the id is
+// the ref's own issue_id (so a ref whose issue isn't synced locally still emits its id,
+// with the joined fields null). UPD-11: api_detail_url is derived from the issue id
+// (the stored cv_issue.api_detail_url column is dropped); a ref with a null id emits null.
 function issueRefRowToObject(row) {
   const values = {
     id: row.issue_id,
     name: row.name,
     issue_number: row.issue_number,
-    api_detail_url: row.api_detail_url
+    api_detail_url: row.issue_id != null ? buildApiDetailUrl("issue", row.issue_id) : null
   };
   let keys = Object.keys(values);
   if (row.key_order) {
@@ -230,7 +231,7 @@ function buildVolumeResult(row, database) {
   const refRows = database
     .prepare(
       `SELECT r.ref_type, r.issue_id, r.key_order,
-              i.name, i.issue_number, i.api_detail_url
+              i.name, i.issue_number
          FROM cv_volume_issue_ref r
          LEFT JOIN cv_issue i ON i.id = r.issue_id
         WHERE r.volume_id = ?`
@@ -319,9 +320,13 @@ function buildResult(row, singular) {
     site_detail_url: has("site_detail_url") ? row.site_detail_url : null,
     publisher
     };
+  // UPD-11: the live API always emits api_detail_url; derive it from the id
+  // (canonical base URL + domain prefix 4050 + id) instead of reading a stored
+  // column, matching publisher (SRV-21) / team (SRV-22) / concept (UPD-13).
+  result.api_detail_url = buildApiDetailUrl("volume", row.id);
   // Additional stored volume fields, copied when the column is present so a
   // field_list request returns the value instead of the null default.
-  for (const field of ["deck", "date_added", "date_last_updated", "api_detail_url"]) {
+  for (const field of ["deck", "date_added", "date_last_updated"]) {
    if (has(field)) result[field] = row[field];
    }
   for (const credit of ["character_credits", "concept_credits", "location_credits", "object_credits", "person_credits", "team_credits"]) {
@@ -339,7 +344,9 @@ function buildResult(row, singular) {
       : {
       id: row.volume_id,
       name: row.volume_name ?? null,
-      api_detail_url: row.volume_api_detail_url ?? buildApiDetailUrl("volume", row.volume_id),
+      // UPD-11: derive the volume's api_detail_url from its id (the stored
+      // cv_volume.api_detail_url column is dropped); the live API always emits it.
+      api_detail_url: buildApiDetailUrl("volume", row.volume_id),
       site_detail_url: row.volume_site_detail_url ?? null
       };
   const result = {
@@ -361,9 +368,15 @@ function buildResult(row, singular) {
   // SRV-19: the live API returns image for issues, so emit it from the stored
   // image_url (normalizeResult enriches it with the derived variant URLs).
   if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
+  // UPD-11: the live API always emits api_detail_url; derive it from the id
+  // (canonical base URL + domain prefix 4000 + id) instead of reading a stored
+  // column, matching publisher (SRV-21) / team (SRV-22) / concept (UPD-13).
+  // Deriving also fills the ~18,000 NULL rows (the UPD-7 window) with the
+  // canonical URL the live API always returns.
+  result.api_detail_url = buildApiDetailUrl("issue", row.id);
   // The additional stored issue fields, copied when the column is present so a
   // field_list request returns the value instead of the null default.
-  for (const field of ["aliases", "api_detail_url", "deck", "date_added", "date_last_updated"]) {
+  for (const field of ["aliases", "deck", "date_added", "date_last_updated"]) {
     if (has(field)) result[field] = row[field];
   }
   if (has("has_staff_review")) result.has_staff_review = parseStaffReview(row.has_staff_review);
@@ -397,7 +410,11 @@ function buildResult(row, singular) {
   }
   if (singular === "person") {
   const result = { id: row.id, name: row.name };
-  for (const field of ["aliases", "api_detail_url", "birth", "country", "deck", "description", "date_added", "date_last_updated", "death", "email", "hometown", "site_detail_url", "website"]) {
+  // UPD-11: the live API always emits api_detail_url; derive it from the id
+  // (canonical base URL + domain prefix 4040 + id) instead of reading a stored
+  // column, matching publisher (SRV-21) / team (SRV-22) / concept (UPD-13).
+  result.api_detail_url = buildApiDetailUrl("person", row.id);
+  for (const field of ["aliases", "birth", "country", "deck", "description", "date_added", "date_last_updated", "death", "email", "hometown", "site_detail_url", "website"]) {
    if (has(field)) result[field] = row[field];
   }
   // SRV-20: the live API emits the issue-credit count under its typo name; the
@@ -659,11 +676,10 @@ function buildResourceConfig(database, resource) {
   } else if (singular === "issue") {
   alias = "i";
   from = `${resource.table} i` + (volumeColumns.size > 0 ? " LEFT JOIN cv_volume v ON v.id = i.volume_id" : "");
-  // The volume's api_detail_url is stored; fall back to the deterministic
-  // ComicVine URL only when the column is absent or null.
-  const volumeApiDetailUrl = volumeColumns.has("api_detail_url") ? "v.api_detail_url AS volume_api_detail_url" : "NULL AS volume_api_detail_url";
+  // UPD-11: the volume's api_detail_url is derived from its id in buildResult
+  // (the stored cv_volume.api_detail_url column is dropped), so it is not selected.
   const volumeSite = volumeColumns.has("site_detail_url") ? "v.site_detail_url AS volume_site_detail_url" : "NULL AS volume_site_detail_url";
-  selectExtra = `i.*, ${volumeColumns.has("name") ? "v.name AS volume_name" : "NULL AS volume_name"}, ${volumeApiDetailUrl}, ${volumeSite}`;
+  selectExtra = `i.*, ${volumeColumns.has("name") ? "v.name AS volume_name" : "NULL AS volume_name"}, ${volumeSite}`;
   } else {
   alias = "p";
   from = `${resource.table} ${alias}`;

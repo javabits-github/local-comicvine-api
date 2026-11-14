@@ -323,6 +323,13 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.ok(!conceptCols.includes("first_appeared_in_issue"), `first_appeared_in_issue JSON column should be dropped, got ${conceptCols.join(", ")}`);
   assert.ok(conceptCols.includes("first_appeared_in_issue_id"), `first_appeared_in_issue_id should exist, got ${conceptCols.join(", ")}`);
 
+  // UPD-11: the same migration drops api_detail_url from the four legacy tables
+  // the server now derives it from (the fixture created the column on each).
+  for (const table of ["cv_publisher", "cv_issue", "cv_volume", "cv_person"]) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    assert.ok(!cols.includes("api_detail_url"), `${table}.api_detail_url should be dropped, got ${cols.join(", ")}`);
+  }
+
   // UPD-14: the three relationship collections are written as cv_concept_credit
   // join rows (issue_credits x2, movies x1, volume_credits x1 = 4 rows). The
   // detail call (not the list) supplies them, so the rows prove the two-phase
@@ -497,11 +504,12 @@ function makeFkDb() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-fk-test-"));
   const dbPath = path.join(dir, "fk.db");
   const db = new DatabaseSync(dbPath);
-  // Full cv_volume / cv_issue column sets (so the 13/32-column upserts work),
+  // Full cv_volume / cv_issue column sets (so the 12/31-column upserts work;
+  // UPD-11: no api_detail_url — the post-migration production schema),
   // plus the production cv_issue→cv_volume FK and the SRV-6c join table.
   db.exec(`
-    CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT);
-    CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER REFERENCES cv_volume(id), name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, object_credits TEXT, concept_credits TEXT, character_died_in TEXT, team_disbanded_in TEXT, first_appearance_characters TEXT, first_appearance_concepts TEXT, first_appearance_locations TEXT, first_appearance_objects TEXT, first_appearance_storyarcs TEXT, first_appearance_teams TEXT, has_staff_review INTEGER);
+    CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT);
+    CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER REFERENCES cv_volume(id), name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT, aliases TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, object_credits TEXT, concept_credits TEXT, character_died_in TEXT, team_disbanded_in TEXT, first_appearance_characters TEXT, first_appearance_concepts TEXT, first_appearance_locations TEXT, first_appearance_objects TEXT, first_appearance_storyarcs TEXT, first_appearance_teams TEXT, has_staff_review INTEGER);
     CREATE TABLE cv_volume_issue_ref (volume_id INTEGER NOT NULL, ref_type TEXT NOT NULL, issue_id INTEGER, key_order TEXT, PRIMARY KEY (volume_id, ref_type));
     CREATE TABLE cv_sync_metadata (endpoint TEXT PRIMARY KEY, last_sync_date TEXT NOT NULL, last_sync_timestamp TEXT NOT NULL, resume_state TEXT);
     CREATE TABLE sync_errors (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, action TEXT, error TEXT, row_data TEXT, created_at TEXT);

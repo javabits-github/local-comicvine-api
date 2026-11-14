@@ -352,6 +352,23 @@ class ComicVineUpdater {
         this.log(`  Warning: Could not drop cv_concept.api_detail_url: ${e.message}`);
       }
     }
+    // UPD-11: drop the api_detail_url columns the server now derives from the id
+    // (buildApiDetailUrl) for the four legacy tables. The live value equals the
+    // canonical form for every non-NULL row (verified against localcv.db), so the
+    // stored copies are redundant; NULL rows are filled by the derivation (the
+    // UPD-7 window for issues). Idempotent: a PRAGMA on an absent table yields no
+    // columns, so this is a no-op where a legacy table does not exist.
+    for (const table of ["cv_publisher", "cv_issue", "cv_volume", "cv_person"]) {
+      const cols = this.conn.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+      if (cols.includes("api_detail_url")) {
+        this.log(`  Dropping ${table}.api_detail_url (now derived from the id)...`);
+        try {
+          this.conn.exec(`ALTER TABLE ${table} DROP COLUMN api_detail_url`);
+        } catch (e) {
+          this.log(`  Warning: Could not drop ${table}.api_detail_url: ${e.message}`);
+        }
+      }
+    }
     // UPD-15: store first_appeared_in_issue as the issue id, not a JSON blob. The
     // object is fully determined by the id, so the server derives it (api_detail_url
     // via buildApiDetailUrl, name/issue_number via a LEFT JOIN cv_issue). Add the id
@@ -901,7 +918,9 @@ class ComicVineUpdater {
 
     while (true) {
       const params = {
-        field_list: "id,name,aliases,api_detail_url,deck,description," +
+        // UPD-11: api_detail_url is derived from the id by the server, so it is
+        // no longer requested or stored.
+        field_list: "id,name,aliases,deck,description," +
           "date_added,date_last_updated,location_address," +
           "location_city,location_state,image,site_detail_url",
         offset, limit
@@ -926,11 +945,11 @@ class ComicVineUpdater {
 
         this.conn.prepare(`
           INSERT INTO cv_publisher
-            (id, name, image_url, site_detail_url, aliases, api_detail_url,
+            (id, name, image_url, site_detail_url, aliases,
              deck, description, date_added, date_last_updated,
              location_address, location_city, location_state,
              characters, story_arcs, teams, volumes)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   COALESCE(?, '[]'), COALESCE(?, '[]'),
                   COALESCE(?, '[]'), COALESCE(?, '[]'))
           ON CONFLICT(id) DO UPDATE SET
@@ -938,7 +957,6 @@ class ComicVineUpdater {
             image_url = excluded.image_url,
             site_detail_url = excluded.site_detail_url,
             aliases = excluded.aliases,
-            api_detail_url = excluded.api_detail_url,
             deck = excluded.deck,
             description = excluded.description,
             date_added = excluded.date_added,
@@ -948,7 +966,7 @@ class ComicVineUpdater {
             location_state = excluded.location_state
         `).run(
           pubId, jsonify(pub.name), imageUrl, pub.site_detail_url,
-          jsonify(pub.aliases), pub.api_detail_url,
+          jsonify(pub.aliases),
           jsonify(pub.deck), jsonify(pub.description),
           jsonify(pub.date_added), jsonify(pub.date_last_updated),
           jsonify(pub.location_address), jsonify(pub.location_city),
@@ -980,7 +998,9 @@ class ComicVineUpdater {
 
     while (true) {
       const params = {
-        field_list: "id,name,aliases,api_detail_url,birth,country,death," +
+        // UPD-11: api_detail_url is derived from the id by the server, so it is
+        // no longer requested or stored.
+        field_list: "id,name,aliases,birth,country,death," +
           "gender,hometown,email,website,image,site_detail_url," +
           "count_of_isssue_appearances,deck,description," +
           "date_added,date_last_updated",
@@ -1009,15 +1029,14 @@ class ComicVineUpdater {
 
         this.conn.prepare(`
           INSERT INTO cv_person
-            (id, name, aliases, api_detail_url, birth, country, death,
+            (id, name, aliases, birth, country, death,
              gender, hometown, email, website, image_url, deck,
              description, date_added, date_last_updated,
              count_of_issue_appearances, site_detail_url)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             aliases = excluded.aliases,
-            api_detail_url = excluded.api_detail_url,
             birth = excluded.birth,
             country = excluded.country,
             death = excluded.death,
@@ -1035,7 +1054,7 @@ class ComicVineUpdater {
         `).run(
           personId,
           person.name, jsonify(person.aliases),
-          person.api_detail_url, jsonify(person.birth),
+          jsonify(person.birth),
           jsonify(person.country), jsonify(person.death),
           jsonify(person.gender), jsonify(person.hometown),
           jsonify(person.email), jsonify(person.website), imageUrl,
@@ -1077,9 +1096,9 @@ class ComicVineUpdater {
       this.conn.prepare(`
         INSERT INTO cv_volume
           (id, name, aliases, start_year, publisher_id, count_of_issues,
-           description, image_url, site_detail_url, api_detail_url,
+           description, image_url, site_detail_url,
            deck, date_added, date_last_updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           aliases = excluded.aliases,
@@ -1089,7 +1108,6 @@ class ComicVineUpdater {
           description = excluded.description,
           image_url = excluded.image_url,
           site_detail_url = excluded.site_detail_url,
-          api_detail_url = excluded.api_detail_url,
           deck = excluded.deck,
           date_added = excluded.date_added,
           date_last_updated = excluded.date_last_updated
@@ -1099,7 +1117,7 @@ class ComicVineUpdater {
         jsonify(vol.start_year), publisherId,
         jsonify(vol.count_of_issues),
         jsonify(vol.description), imageUrl,
-        vol.site_detail_url, vol.api_detail_url,
+        vol.site_detail_url,
         jsonify(vol.deck), jsonify(vol.date_added),
         jsonify(vol.date_last_updated)
       );
@@ -1132,8 +1150,10 @@ class ComicVineUpdater {
   // Fetch a single volume's detail from the live API (mirrors fetchIssueDetails).
   // Returns the volume object, or null if the API call fails / rate-limits.
   async fetchVolumeDetails(volumeId) {
+    // UPD-11: api_detail_url is derived from the id by the server, so it is
+    // no longer requested or stored.
     const fieldList = "id,name,aliases,start_year,publisher,count_of_issues," +
-      "description,image,site_detail_url,api_detail_url,deck," +
+      "description,image,site_detail_url,deck," +
       "date_added,date_last_updated,first_issue,last_issue";
     const data = await this.apiCall(`volume/4050-${volumeId}/`, { field_list: fieldList });
     if (data) return data.results;
@@ -1149,8 +1169,10 @@ class ComicVineUpdater {
 
     while (true) {
       const params = {
+        // UPD-11: api_detail_url is derived from the id by the server, so it is
+        // no longer requested or stored.
         field_list: "id,name,aliases,start_year,publisher,count_of_issues," +
-          "description,image,site_detail_url,api_detail_url,deck," +
+          "description,image,site_detail_url,deck," +
           "date_added,date_last_updated,first_issue,last_issue",
         offset, limit
       };
@@ -1197,13 +1219,13 @@ class ComicVineUpdater {
          description, image_url, site_detail_url,
          character_credits, person_credits, team_credits,
          location_credits, story_arc_credits, associated_images,
-         aliases, api_detail_url, deck, date_added, date_last_updated,
+         aliases, deck, date_added, date_last_updated,
          object_credits, concept_credits, character_died_in,
          team_disbanded_in, first_appearance_characters,
          first_appearance_concepts, first_appearance_locations,
          first_appearance_objects, first_appearance_storyarcs,
          first_appearance_teams, has_staff_review)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const params = [
       issueId, volumeId,
@@ -1218,7 +1240,9 @@ class ComicVineUpdater {
       JSON.stringify(issueData.location_credits || []),
       JSON.stringify(issueData.story_arc_credits || []),
       JSON.stringify(issueData.associated_images || []),
-      jsonify(issueData.aliases), issueData.api_detail_url,
+      // UPD-11: api_detail_url is derived from the id by the server, so it is
+      // no longer stored.
+      jsonify(issueData.aliases),
       jsonify(issueData.deck), jsonify(issueData.date_added),
       jsonify(issueData.date_last_updated),
       JSON.stringify(issueData.object_credits || []),
