@@ -2034,3 +2034,246 @@ test("SRV-3: a resource without its table still 404s (object remains open)", asy
   }
 });
 
+// ─── SRV-30: gzip compression ──────────────────────────────────────────────
+
+// Node's global fetch auto-decompresses gzip responses, so these tests read the
+// raw wire bytes over a socket and gunzip them themselves — the only way to
+// observe the Content-Encoding header and the compressed body.
+const net = require("node:net");
+const zlib = require("node:zlib");
+
+function rawGet(port, path, acceptEncoding) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, "127.0.0.1", () => {
+      const ae = acceptEncoding ? `Accept-Encoding: ${acceptEncoding}\r\n` : "";
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\n${ae}Connection: close\r\n\r\n`);
+    });
+    const chunks = [];
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.on("end", () => resolve(Buffer.concat(chunks)));
+    socket.on("error", reject);
+  });
+}
+
+function parseRaw(raw) {
+  const headerEnd = raw.indexOf("\r\n\r\n");
+  const headers = raw.slice(0, headerEnd).toString();
+  let body = raw.slice(headerEnd + 4);
+  if (/Transfer-Encoding: chunked/i.test(headers)) {
+    const out = [];
+    let i = 0;
+    while (i < body.length) {
+      const lineEnd = body.indexOf("\r\n", i);
+      if (lineEnd === -1) break;
+      const size = Number.parseInt(body.slice(i, lineEnd).toString(), 16);
+      if (!Number.isFinite(size) || size === 0) break;
+      out.push(body.slice(lineEnd + 2, lineEnd + 2 + size));
+      i = lineEnd + 2 + size + 2;
+    }
+    body = Buffer.concat(out);
+  }
+  const header = (name) => {
+    const match = headers.match(new RegExp(`^${name}: (.*)$`, "im"));
+    return match ? match[1] : null;
+  };
+  return { body, contentEncoding: header("Content-Encoding"), vary: header("Vary") };
+}
+
+function makeGzipTestDb() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-gzip-test-"));
+  const dbPath = path.join(dir, "gzip.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE cv_volume (
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT,
+      publisher_id INTEGER, count_of_issues INTEGER, description TEXT,
+      image_url TEXT, site_detail_url TEXT, character_credits TEXT, team_credits TEXT,
+      date_added TEXT, date_last_updated TEXT, deck TEXT
+    );
+  `);
+  for (let i = 1; i <= 100; i++) {
+    db.prepare("INSERT INTO cv_volume (id, name, date_added) VALUES (?, ?, ?)")
+      .run(i, `Volume ${i}`, "2020-01-01 00:00:00");
+  }
+  db.close();
+  return { dir, dbPath };
+}
+
+test("compresses large bodies for gzip clients when enabled (SRV-30)", async () => {
+  const { dir, dbPath } = makeGzipTestDb();
+  const srv = createApiServer(dbPath, () => {}, { compress: true });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const port = srv.address().port;
+  try {
+    const { body, contentEncoding, vary } = parseRaw(await rawGet(port, "/api/volumes?limit=100", "gzip"));
+    assert.equal(contentEncoding, "gzip");
+    assert.equal(vary, "Accept-Encoding");
+    // The wire bytes are a real gzip stream that round-trips to the plain JSON.
+    const plain = zlib.gunzipSync(body);
+    const parsed = JSON.parse(plain.toString("utf8"));
+    assert.equal(parsed.status_code, 1);
+    assert.equal(parsed.number_of_total_results, 100);
+    // gzip actually shrank the payload.
+    assert.ok(body.length < plain.length);
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sends uncompressed when the client does not accept gzip (SRV-30)", async () => {
+  const { dir, dbPath } = makeGzipTestDb();
+  const srv = createApiServer(dbPath, () => {}, { compress: true });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const port = srv.address().port;
+  try {
+    for (const acceptEncoding of [null, "identity", "gzip;q=0", "deflate"]) {
+      const { body, contentEncoding, vary } = parseRaw(await rawGet(port, "/api/volumes?limit=100", acceptEncoding));
+      assert.equal(contentEncoding, null, `Accept-Encoding: ${acceptEncoding ?? "(none)"} should stay uncompressed`);
+      assert.equal(vary, null);
+      // The body is the plain JSON, not a gzip stream.
+      const parsed = JSON.parse(body.toString("utf8"));
+      assert.equal(parsed.number_of_total_results, 100);
+    }
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("keeps small bodies below the minimum size uncompressed (SRV-30)", async () => {
+  const { dir, dbPath } = makeGzipTestDb();
+  const srv = createApiServer(dbPath, () => {}, { compress: true });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const port = srv.address().port;
+  try {
+    // A single volume is well under the 1024-byte default minimum.
+    const small = parseRaw(await rawGet(port, "/api/volumes?limit=1", "gzip"));
+    assert.equal(small.contentEncoding, null);
+    assert.equal(small.vary, null);
+    // The same request with a zero minimum is compressed.
+    const srvZero = createApiServer(dbPath, () => {}, { compress: true, compressMinSize: 0 });
+    await new Promise((resolve) => srvZero.listen(0, "127.0.0.1", resolve));
+    try {
+      const { body, contentEncoding } = parseRaw(await rawGet(srvZero.address().port, "/api/volumes?limit=1", "gzip"));
+      assert.equal(contentEncoding, "gzip");
+      assert.ok(zlib.gunzipSync(body).length > 0);
+    } finally {
+      await new Promise((resolve) => srvZero.close(resolve));
+    }
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("compresses XML and JSONP responses (SRV-30)", async () => {
+  const { dir, dbPath } = makeGzipTestDb();
+  const srv = createApiServer(dbPath, () => {}, { compress: true });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const port = srv.address().port;
+  try {
+    const xml = parseRaw(await rawGet(port, "/api/volumes?limit=100&format=xml", "gzip"));
+    assert.equal(xml.contentEncoding, "gzip");
+    assert.match(zlib.gunzipSync(xml.body).toString("utf8"), /^<\?xml version="1\.0"/);
+
+    const jsonp = parseRaw(await rawGet(port, "/api/volumes?limit=100&format=jsonp&json_callback=cb", "gzip"));
+    assert.equal(jsonp.contentEncoding, "gzip");
+    const jsonpText = zlib.gunzipSync(jsonp.body).toString("utf8");
+    assert.match(jsonpText, /^cb\(\{.*\}\);$/s);
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stays uncompressed by default and honors the env opt-in (SRV-30)", async () => {
+  const { dir, dbPath } = makeGzipTestDb();
+  // Default: no compression option, no env var — large bodies stay plain.
+  const defaultSrv = createApiServer(dbPath, () => {});
+  await new Promise((resolve) => defaultSrv.listen(0, "127.0.0.1", resolve));
+  try {
+    const { contentEncoding, vary } = parseRaw(await rawGet(defaultSrv.address().port, "/api/volumes?limit=100", "gzip"));
+    assert.equal(contentEncoding, null);
+    assert.equal(vary, null);
+  } finally {
+    await new Promise((resolve) => defaultSrv.close(resolve));
+  }
+
+  // The COMICVINE_COMPRESS env var enables it (parseBoolFlag on-spelling).
+  const previous = process.env.COMICVINE_COMPRESS;
+  process.env.COMICVINE_COMPRESS = "1";
+  const envSrv = createApiServer(dbPath, () => {});
+  await new Promise((resolve) => envSrv.listen(0, "127.0.0.1", resolve));
+  try {
+    const { body, contentEncoding } = parseRaw(await rawGet(envSrv.address().port, "/api/volumes?limit=100", "gzip"));
+    assert.equal(contentEncoding, "gzip");
+    assert.ok(zlib.gunzipSync(body).length > 0);
+  } finally {
+    await new Promise((resolve) => envSrv.close(resolve));
+    if (previous === undefined) delete process.env.COMICVINE_COMPRESS;
+    else process.env.COMICVINE_COMPRESS = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("logs the pre-compression response body (SRV-30 / SRV-16)", async () => {
+  const { dir, dbPath } = makeGzipTestDb();
+  const logs = [];
+  const srv = createApiServer(dbPath, (entry) => logs.push(entry), { compress: true, logResponses: true, logResponseMaxLength: 100000 });
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const port = srv.address().port;
+  try {
+    // The wire bytes are gzip, but the SRV-16 log capture must stay readable.
+    const { body, contentEncoding } = parseRaw(await rawGet(port, "/api/volumes?limit=100", "gzip"));
+    assert.equal(contentEncoding, "gzip");
+    assert.ok(body.length < 20000);
+
+    const finish = logs.find((entry) => entry.path === "/api/volumes" && entry.response_body);
+    assert.ok(finish, "a finish log line with response_body is emitted");
+    // The logged body is the uncompressed JSON, not the gzip bytes.
+    assert.ok(!finish.response_body.startsWith("\u001f\u008b"), "the log body is not gzip");
+    const parsed = JSON.parse(finish.response_body);
+    assert.equal(parsed.number_of_total_results, 100);
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("compressBody and acceptedEncodings behave (SRV-30)", () => {
+  const { compressBody, acceptedEncodings } = require("../src/server");
+  const big = Buffer.from(JSON.stringify({ data: "x".repeat(5000) }));
+
+  // No Accept-Encoding: the buffer is returned unchanged, no headers.
+  const none = compressBody({ headers: {} }, big, { enabled: true, minSize: 1024 });
+  assert.equal(none.buffer, big);
+  assert.deepEqual(none.headers, {});
+
+  // gzip accepted and the body clears the minimum: a real gzip stream.
+  const gz = compressBody({ headers: { "accept-encoding": "gzip" } }, big, { enabled: true, minSize: 1024 });
+  assert.notEqual(gz.buffer, big);
+  assert.equal(gz.headers["Content-Encoding"], "gzip");
+  assert.equal(gz.headers["Vary"], "Accept-Encoding");
+  assert.equal(zlib.gunzipSync(gz.buffer).toString("utf8"), big.toString("utf8"));
+
+  // Below the minimum: unchanged even when gzip is accepted.
+  const smallInput = Buffer.from("{}");
+  const small = compressBody({ headers: { "accept-encoding": "gzip" } }, smallInput, { enabled: true, minSize: 1024 });
+  assert.equal(small.buffer, smallInput);
+  assert.deepEqual(small.headers, {});
+
+  // Disabled: unchanged regardless of the header.
+  const off = compressBody({ headers: { "accept-encoding": "gzip" } }, big, { enabled: false, minSize: 0 });
+  assert.equal(off.buffer, big);
+  assert.deepEqual(off.headers, {});
+
+  // acceptedEncodings parses tokens and qualities; q=0 and * are dropped.
+  assert.deepEqual(acceptedEncodings({ headers: { "accept-encoding": "gzip, deflate" } }), [
+    { token: "gzip", quality: 1 },
+    { token: "deflate", quality: 1 }
+  ]);
+  assert.deepEqual(acceptedEncodings({ headers: { "accept-encoding": "gzip;q=0" } }), []);
+  assert.deepEqual(acceptedEncodings({ headers: { "accept-encoding": "*" } }), []);
+  assert.deepEqual(acceptedEncodings({ headers: {} }), []);
+});

@@ -2,6 +2,7 @@ const { createServer } = require("node:http");
 const { DatabaseSync } = require("node:sqlite");
 const path = require("node:path");
 const fs = require("node:fs");
+const zlib = require("node:zlib");
 const { resourceConfig, buildApiDetailUrl } = require("./fieldConfig.js");
 const { validateEntity } = require("./validate.js");
 
@@ -728,16 +729,54 @@ function corsHeaders(request, corsOrigins) {
   return { Vary: "Origin" };
 }
 
-function sendJson(response, statusCode, body) {
+// SRV-30: the Accept-Encoding tokens the client actually wants, in order.
+// `gzip;q=0` (and `*`) are excluded — a zero quality means "not acceptable".
+function acceptedEncodings(request) {
+  const header = request.headers["accept-encoding"];
+  if (typeof header !== "string" || !header.trim()) return [];
+  return header
+    .split(",")
+    .map((part) => {
+      const [token, ...parameters] = part.trim().split(";");
+      const quality = Number.parseFloat(parameters.find((parameter) => parameter.trim().startsWith("q="))?.split("=")[1] ?? "1");
+      return { token: token.trim().toLowerCase(), quality: Number.isFinite(quality) ? quality : 1 };
+    })
+    .filter((entry) => entry.quality > 0 && entry.token !== "*");
+}
+
+// SRV-30: the extra headers a compressed response carries. `Vary: Accept-Encoding`
+// is merged with any existing Vary (e.g. the CORS "Origin") so caches key by both.
+function compressionHeaders(existingHeaders, vary) {
+  const headers = { ...existingHeaders, "Content-Encoding": "gzip" };
+  const current = headers["Vary"];
+  headers["Vary"] = current ? `${current}, Accept-Encoding` : "Accept-Encoding";
+  return headers;
+}
+
+// SRV-30: gzip the body when compression is enabled, the client accepts it
+// (Accept-Encoding: gzip), and the body clears the minimum size. Returns the
+// (possibly compressed) buffer plus the headers to send; the input buffer is
+// always returned unchanged when the response stays uncompressed.
+function compressBody(request, buffer, compression) {
+  if (!compression.enabled || buffer.length < compression.minSize) return { buffer, headers: {} };
+  if (!acceptedEncodings(request).some((entry) => entry.token === "gzip")) return { buffer, headers: {} };
+  return { buffer: zlib.gzipSync(buffer), headers: compressionHeaders({}, "Accept-Encoding") };
+}
+
+function sendJson(response, statusCode, body, compression = { enabled: false, minSize: 0 }) {
+  const text = JSON.stringify(body);
+  if (response.__recordResponseBody) response.__recordResponseBody(text);
+  const { buffer, headers } = compressBody(response.req, Buffer.from(text, "utf8"), compression);
   response.writeHead(statusCode, {
     ...corsHeadersFor(response),
-    "Content-Type": "application/json; charset=utf-8"
+    "Content-Type": "application/json; charset=utf-8",
+    ...headers
   });
-  response.end(JSON.stringify(body));
+  response.end(buffer);
 }
 
 // Serialize the shared ComicVine envelope; resultItemName distinguishes collection types in XML.
-function sendFormattedResponse(response, body, format, callback, resultItemName = "result") {
+function sendFormattedResponse(response, body, format, callback, resultItemName = "result", compression = { enabled: false, minSize: 0 }) {
   if (format === "xml") {
     const escapeXml = (value) => String(value).replace(/[&<>"']/g, (character) => ({
       "&": "&amp;",
@@ -758,24 +797,32 @@ function sendFormattedResponse(response, body, format, callback, resultItemName 
       return `<${name}>${escapeXml(value)}</${name}>`;
     };
 
+    const xmlText = `<?xml version="1.0" encoding="UTF-8"?>${toXml("response", body)}`;
+    if (response.__recordResponseBody) response.__recordResponseBody(xmlText);
+    const { buffer, headers } = compressBody(response.req, Buffer.from(xmlText, "utf8"), compression);
     response.writeHead(200, {
       ...corsHeadersFor(response),
-      "Content-Type": "application/xml; charset=utf-8"
+      "Content-Type": "application/xml; charset=utf-8",
+      ...headers
     });
-    response.end(`<?xml version="1.0" encoding="UTF-8"?>${toXml("response", body)}`);
+    response.end(buffer);
     return;
   }
 
   if (format === "jsonp") {
+    const jsonpText = `${callback}(${JSON.stringify(body)});`;
+    if (response.__recordResponseBody) response.__recordResponseBody(jsonpText);
+    const { buffer, headers } = compressBody(response.req, Buffer.from(jsonpText, "utf8"), compression);
     response.writeHead(200, {
       ...corsHeadersFor(response),
-      "Content-Type": "application/javascript; charset=utf-8"
+      "Content-Type": "application/javascript; charset=utf-8",
+      ...headers
     });
-    response.end(`${callback}(${JSON.stringify(body)});`);
+    response.end(buffer);
     return;
   }
 
-  sendJson(response, 200, body);
+  sendJson(response, 200, body, compression);
 }
 
 // Reduce a request path to a stable endpoint key so per-endpoint stats aggregate
@@ -981,6 +1028,13 @@ function positiveInt(value, fallback) {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
 }
 
+// Like positiveInt but accepts 0 (used for the gzip minimum body size, where 0
+// means "compress every body the client accepts").
+function nonNegativeInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
+
 // Resolve an effective page size. A requested limit is clamped to [1, maxLimit];
 // when no limit is requested, the default is used (still clamped to maxLimit).
 function resolveLimit(requested, defaultLimit, maxLimit) {
@@ -1159,6 +1213,22 @@ function createApiServer(
        : process.env.COMICVINE_CORS_ORIGINS
    );
 
+    // SRV-30: optional gzip compression of response bodies. `options.compress`
+    // (boolean) or COMICVINE_COMPRESS (an on/off spelling, see parseBoolFlag)
+    // enables it; `options.compressMinSize` (or COMICVINE_COMPRESS_MIN_SIZE) sets
+    // the minimum body size in bytes before compression kicks in (default 1024 —
+    // gzip's fixed overhead makes tiny bodies LARGER, so they stay uncompressed).
+    // When enabled, a body is gzipped only if the client's Accept-Encoding
+    // includes gzip with a non-zero quality AND the serialized body is at least
+    // compressMinSize bytes; compressed responses carry Content-Encoding: gzip
+    // and Vary: Accept-Encoding, and everything else is byte-identical to before.
+    const compression = {
+      enabled: Boolean(options.compress ?? process.env.COMICVINE_COMPRESS),
+      // A non-negative byte count (unlike positiveInt, which rejects 0): 0 means
+      // "compress every body the client accepts", so it is honored as 0.
+      minSize: nonNegativeInt(options.compressMinSize ?? process.env.COMICVINE_COMPRESS_MIN_SIZE, 1024)
+    };
+
    // SRV-1: the default sort column for list endpoints that have no ?sort=.
    // `options.defaultSort` is either a single field name (applied to every
    // resource) or a per-resource map, e.g. { volume: "name", issue: "issue_number" };
@@ -1261,6 +1331,8 @@ function createApiServer(
     // SRV-14: compute the CORS headers once per request and stash them on the
     // response so every sendJson/sendFormattedResponse below can merge them in.
     response.__corsHeaders = corsHeaders(request, corsOrigins);
+    // SRV-30: the send helpers read the request's Accept-Encoding via response.req.
+    response.req = request;
     // SRV-17: when SQL logging is enabled, collect the queries run for this
     // request so the per-request "finish" line can include them.
     if (logSql) {
@@ -1271,28 +1343,17 @@ function createApiServer(
     // (the chunks written before `end`) so the per-request "finish" line can
     // include it. Off by default, so this captures nothing for normal requests.
     if (logResponses) {
-      const chunks = [];
-      let length = 0;
-      const originalWrite = response.write.bind(response);
-      response.write = (chunk, ...args) => {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        length += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
-        return originalWrite(chunk, ...args);
-      };
-      const originalEnd = response.end.bind(response);
-      response.end = (chunk, ...args) => {
-        if (chunk !== undefined && chunk !== null) {
-          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          chunks.push(buf);
-          length += buf.length;
-        }
-        return originalEnd(chunk, ...args);
-      };
+      // SRV-30: record the PRE-compression body (the send helpers call
+      // __recordResponseBody with the plain text before any gzip is applied),
+      // so the logged response_body stays readable even when the wire bytes are
+      // compressed. The send helpers always emit a single chunk, so one record
+      // is the whole body.
+      let bodyText = "";
+      response.__recordResponseBody = (text) => { bodyText = text; };
       response.__responseBody = () => {
-        const full = Buffer.concat(chunks);
-        const truncated = full.length > logResponseMaxLength;
-        const text = full.slice(0, logResponseMaxLength).toString("utf8");
-        return truncated ? `${text}…[truncated ${full.length - logResponseMaxLength} of ${full.length} bytes]` : text;
+        const truncated = bodyText.length > logResponseMaxLength;
+        const text = bodyText.slice(0, logResponseMaxLength);
+        return truncated ? `${text}…[truncated ${bodyText.length - logResponseMaxLength} of ${bodyText.length} chars]` : text;
       };
     }
     response.once("finish", () => {
@@ -1483,7 +1544,7 @@ function createApiServer(
         }
 
         const results = allResults.slice(offset, offset + limit);
-        sendFormattedResponse(response, comicVineResponse(results, limit, offset, total), format, callback);
+        sendFormattedResponse(response, comicVineResponse(results, limit, offset, total), format, callback, compression);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -1522,7 +1583,7 @@ function createApiServer(
           error: "Object Not Found",
           status_code: 101
           };
-         sendFormattedResponse(response, notFound, format, callback);
+         sendFormattedResponse(response, notFound, format, callback, compression);
          return;
         }
 
@@ -1552,11 +1613,11 @@ function createApiServer(
         });
         // The envelope keeps its shape; the diff is reported in an extra field.
         const body = { ...comicVineResponse(result, 1, 0, 1), validation };
-        sendFormattedResponse(response, body, format, callback);
+        sendFormattedResponse(response, body, format, callback, compression);
         return;
       }
 
-      sendFormattedResponse(response, comicVineResponse(result, 1, 0, 1), format, callback);
+      sendFormattedResponse(response, comicVineResponse(result, 1, 0, 1), format, callback, compression);
       return;
       }
 
@@ -1593,7 +1654,7 @@ function createApiServer(
       return projectResult(resource.singular, normalized, fieldList);
       });
 
-     sendFormattedResponse(response, comicVineResponse(results, limit, offset, total), format, callback, resource.singular);
+     sendFormattedResponse(response, comicVineResponse(results, limit, offset, total), format, callback, resource.singular, compression);
     } catch (error) {
      sendJson(response, 400, { error: error.message });
     }
@@ -1632,10 +1693,14 @@ if (require.main === module) {
     // (truncated to COMICVINE_LOG_SQL_MAX_LENGTH). Off by default.
     if (parseBoolFlag(process.env.COMICVINE_LOG_SQL)) options.logSql = true;
     if (process.env.COMICVINE_LOG_SQL_MAX_LENGTH) options.logSqlMaxLength = process.env.COMICVINE_LOG_SQL_MAX_LENGTH;
+    // SRV-30: COMICVINE_COMPRESS=1 enables gzip response compression;
+    // COMICVINE_COMPRESS_MIN_SIZE sets the minimum body size in bytes (default 1024).
+    if (parseBoolFlag(process.env.COMICVINE_COMPRESS)) options.compress = true;
+    if (process.env.COMICVINE_COMPRESS_MIN_SIZE) options.compressMinSize = process.env.COMICVINE_COMPRESS_MIN_SIZE;
     const server = createApiServer(databasePath, undefined, options);
   server.listen(port, host, () => {
     defaultLogger({ type: "startup", level: "info", message: `listening at http://${host}:${port}`, timestamp: new Date().toISOString() });
   });
 }
 
-module.exports = { createApiServer, resourceConfig, parseBoolFlag };
+module.exports = { createApiServer, resourceConfig, parseBoolFlag, compressBody, acceptedEncodings };
