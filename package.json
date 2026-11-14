@@ -9,6 +9,7 @@
     "test": "node --test",
     "sync": "node --env-file-if-exists=.env src/updater.js",
     "sync:full": "node --env-file-if-exists=.env src/updater.js --full",
+    "migrate": "node src/migrate.js",
     "rawapi": "node --env-file-if-exists=.env src/rawapi.js",
     "rawapi:full": "node --env-file-if-exists=.env src/rawapi.js --full"
   },

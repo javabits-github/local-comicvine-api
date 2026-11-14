@@ -596,8 +596,8 @@ test("issue FK failure with unfetchable volume is skipped, not fatal", async () 
 
 // A full-schema DB (all seven base tables + metadata) for isolated runSync
 // filtering tests. cv_volume deliberately omits the legacy _credits / first /
-// last columns so ensureVolumeCreditTables' migration is a no-op. The FTS
-// tables are created by ensureFtsTables during runSync.
+// last columns so the SRV-6c migration (src/migrate.js) is a no-op. The FTS
+// tables are created by migrate() during runSync.
 function makeFullDb() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-res-test-"));
   const dbPath = path.join(dir, "res.db");

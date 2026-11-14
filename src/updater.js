@@ -8,6 +8,9 @@
  *
  * Uses node:sqlite + global fetch (zero npm dependencies).
  *
+ * Schema creation and one-shot migrations live in src/migrate.js (UPD-17);
+ * runSync applies them first. `npm run migrate` runs them standalone.
+ *
  * Configuration is read from `.env` (COMICVINE_API_KEY) or the process
  * environment.
  *
@@ -40,6 +43,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const readline = require("node:readline/promises");
+const { migrate } = require("./migrate.js");
 
 // ─── API Configuration ───────────────────────────────────────────────────────
 const API_BASE_URL = "https://comicvine.gamespot.com/api/";
@@ -309,457 +313,20 @@ class ComicVineUpdater {
     }
   }
 
-  // ─── Schema helpers ─────────────────────────────────────────────────────
-
-  ensureResourceTables() {
-    if (!this.conn) return;
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_team (
-        id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT,
-        count_of_team_members INTEGER, count_of_issue_appearances INTEGER,
-        deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
-        image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT,
-        character_enemies TEXT, character_friends TEXT, characters TEXT,
-        disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT,
-        movies TEXT, story_arc_credits TEXT, volume_credits TEXT
-      )
-    `);
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_storyarc (
-        id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT,
-        count_of_issue_appearances INTEGER, deck TEXT, description TEXT,
-        date_added TEXT, date_last_updated TEXT, image_url TEXT,
-        site_detail_url TEXT, first_appeared_in_issue TEXT, issues TEXT, movies TEXT
-      )
-    `);
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_concept (
-        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT,
-        deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
-        image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER,
-        count_of_issue_appearances INTEGER, start_year TEXT
-      )
-    `);
-    // UPD-13: drop the api_detail_url column the server now derives from the id
-    // (buildApiDetailUrl). The live value equals the canonical form for every row,
-    // so the stored copy is redundant. Idempotent: no-op on a fresh table.
-    const conceptCols = this.conn.prepare("PRAGMA table_info(cv_concept)").all().map((c) => c.name);
-    if (conceptCols.includes("api_detail_url")) {
-      this.log("  Dropping cv_concept.api_detail_url (now derived from the id)...");
-      try {
-        this.conn.exec("ALTER TABLE cv_concept DROP COLUMN api_detail_url");
-      } catch (e) {
-        this.log(`  Warning: Could not drop cv_concept.api_detail_url: ${e.message}`);
-      }
-    }
-    // UPD-11: drop the api_detail_url columns the server now derives from the id
-    // (buildApiDetailUrl) for the four legacy tables. The live value equals the
-    // canonical form for every non-NULL row (verified against localcv.db), so the
-    // stored copies are redundant; NULL rows are filled by the derivation (the
-    // UPD-7 window for issues). Idempotent: a PRAGMA on an absent table yields no
-    // columns, so this is a no-op where a legacy table does not exist.
-    for (const table of ["cv_publisher", "cv_issue", "cv_volume", "cv_person"]) {
-      const cols = this.conn.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
-      if (cols.includes("api_detail_url")) {
-        this.log(`  Dropping ${table}.api_detail_url (now derived from the id)...`);
-        try {
-          this.conn.exec(`ALTER TABLE ${table} DROP COLUMN api_detail_url`);
-        } catch (e) {
-          this.log(`  Warning: Could not drop ${table}.api_detail_url: ${e.message}`);
-        }
-      }
-    }
-    // UPD-15: store first_appeared_in_issue as the issue id, not a JSON blob. The
-    // object is fully determined by the id, so the server derives it (api_detail_url
-    // via buildApiDetailUrl, name/issue_number via a LEFT JOIN cv_issue). Add the id
-    // column to pre-UPD-15 databases, backfill it from the legacy JSON column, then
-    // drop that column. Idempotent: a fresh table already has the id column and no
-    // JSON column, so both blocks are no-ops.
-    if (!conceptCols.includes("first_appeared_in_issue_id")) {
-      this.log("  Adding first_appeared_in_issue_id column to cv_concept...");
-      try {
-        this.conn.exec("ALTER TABLE cv_concept ADD COLUMN first_appeared_in_issue_id INTEGER");
-      } catch (e) {
-        this.log(`  Warning: Could not add first_appeared_in_issue_id: ${e.message}`);
-      }
-    }
-    if (conceptCols.includes("first_appeared_in_issue")) {
-      this.log("  Backfilling cv_concept.first_appeared_in_issue_id from the JSON column...");
-      let backfillOk = true;
-      try {
-        this.conn.exec("BEGIN");
-        const pending = this.conn.prepare(
-          "SELECT id, first_appeared_in_issue FROM cv_concept " +
-          "WHERE first_appeared_in_issue IS NOT NULL AND first_appeared_in_issue_id IS NULL"
-        ).all();
-        const update = this.conn.prepare(
-          "UPDATE cv_concept SET first_appeared_in_issue_id = ? WHERE id = ?"
-        );
-        let filled = 0;
-        for (const row of pending) {
-          let parsed;
-          try { parsed = JSON.parse(row.first_appeared_in_issue); } catch { continue; }
-          const issueId = parsed && parsed.id != null ? parsed.id : null;
-          if (issueId != null) { update.run(issueId, row.id); filled++; }
-        }
-        this.conn.exec("COMMIT");
-        this.log(`  Backfilled ${filled} first_appeared_in_issue_id values.`);
-      } catch (e) {
-        try { this.conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
-        backfillOk = false;
-        this.log(`  Warning: first_appeared_in_issue_id backfill failed: ${e.message}`);
-      }
-      // Only drop the JSON column once the id is safely backfilled; otherwise keep
-      // it so no data is lost (the server still reads it as a fallback).
-      if (backfillOk) {
-        this.log("  Dropping cv_concept.first_appeared_in_issue (now derived from the id)...");
-        try {
-          this.conn.exec("ALTER TABLE cv_concept DROP COLUMN first_appeared_in_issue");
-        } catch (e) {
-          this.log(`  Warning: Could not drop cv_concept.first_appeared_in_issue: ${e.message}`);
-        }
-      } else {
-        this.log("  Keeping cv_concept.first_appeared_in_issue (backfill did not complete).");
-      }
-    }
-    // SRV-3: the three remaining 404 resources (object stays open). The
-    // relationship collections are stored as JSON text (the pre-SRV-6
-    // denormalized pattern); their normalization belongs with SRV-6.
-    // first_appeared_in_issue is stored as the issue id (the UPD-15 concept
-    // pattern) so the server can derive the object and join cv_issue.
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_character (
-        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, real_name TEXT,
-        birth TEXT, gender INTEGER, deck TEXT, description TEXT,
-        date_added TEXT, date_last_updated TEXT, image_url TEXT,
-        site_detail_url TEXT, first_appeared_in_issue_id INTEGER,
-        count_of_issue_appearances INTEGER,
-        publisher TEXT, origin TEXT, teams TEXT, movies TEXT, powers TEXT,
-        creators TEXT, issue_credits TEXT, volume_credits TEXT,
-        story_arc_credits TEXT, issues_died_in TEXT, character_enemies TEXT,
-        character_friends TEXT, team_enemies TEXT, team_friends TEXT
-      )
-    `);
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_location (
-        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT,
-        description TEXT, start_year TEXT, date_added TEXT, date_last_updated TEXT,
-        image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER,
-        count_of_issue_appearances INTEGER,
-        issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, movies TEXT
-      )
-    `);
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_power (
-        id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, description TEXT,
-        date_added TEXT, date_last_updated TEXT, image_url TEXT,
-        site_detail_url TEXT, characters TEXT
-      )
-    `);
-    // Seed last_sync_date for new endpoints at the raw-dump snapshot date.
-    const snapshot = "2026-01-22";
-    const timestamp = new Date().toISOString();
-    for (const endpoint of ["teams", "storyarcs", "concepts", "characters", "locations", "powers"]) {
-      this.conn.prepare(
-        `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
-         VALUES (?, ?, ?)
-         ON CONFLICT(endpoint) DO NOTHING`
-      ).run(endpoint, snapshot, timestamp);
-    }
-  }
-
-  // ─── SRV-6c: volume credit/issue-reference normalization ───────────────
-
-  // The six volume credit collections and the first/last issue references are
-  // stored as JSON text on cv_volume. This method normalizes them into join
-  // tables so the server can generate the collections directly:
-  //   - cv_volume_credit: one row per credit entry (credit_type + position).
-  //   - cv_volume_issue_ref: one row per first/last issue reference, a true
-  //     join to cv_issue (stores only the issue id + the emitted key order; the
-  //     display fields are resolved from the issue row on read).
-  //   - cv_volume.credits_presence: a bitmask (bit i = credit type i) that
-  //     distinguishes an empty [] collection from a null one.
-  // It backfills the join tables from the JSON columns and then drops those
-  // columns. The live API returns collections only for issues, so volume
-  // credits are historical; first/last issue keep refreshing via syncVolumes.
-  ensureVolumeCreditTables() {
-    if (!this.conn) return;
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_volume_credit (
-        volume_id INTEGER NOT NULL,
-        credit_type TEXT NOT NULL,
-        position INTEGER NOT NULL,
-        credit_id INTEGER,
-        name TEXT,
-        count TEXT,
-        api_detail_url TEXT,
-        site_detail_url TEXT,
-        PRIMARY KEY (volume_id, credit_type, position)
-      )
-    `);
-    this.conn.exec(`
-      CREATE INDEX IF NOT EXISTS idx_volume_credit_type
-        ON cv_volume_credit (credit_type, credit_id)
-    `);
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_volume_issue_ref (
-        volume_id INTEGER NOT NULL,
-        ref_type TEXT NOT NULL,
-        issue_id INTEGER,
-        key_order TEXT,
-        PRIMARY KEY (volume_id, ref_type)
-      )
-    `);
-    // SRV-6c: drop the denormalized snapshot columns if an older version of the
-    // table still carries them (the display fields now come from cv_issue).
-    for (const col of ["name", "issue_number", "api_detail_url"]) {
-      const cols = this.conn.prepare("PRAGMA table_info(cv_volume_issue_ref)").all().map((c) => c.name);
-      if (cols.includes(col)) {
-        try { this.conn.exec(`ALTER TABLE cv_volume_issue_ref DROP COLUMN ${col}`); } catch { /* ignore */ }
-      }
-    }
-
-    // Add the presence bitmask column to older databases (idempotent).
-    const volumeCols = this.conn.prepare("PRAGMA table_info(cv_volume)").all().map((c) => c.name);
-    if (!volumeCols.includes("credits_presence")) {
-      this.log("  Adding credits_presence column to cv_volume...");
-      try {
-        this.conn.exec("ALTER TABLE cv_volume ADD COLUMN credits_presence INTEGER");
-      } catch (e) {
-        this.log(`  Warning: Could not add credits_presence: ${e.message}`);
-      }
-    }
-
-    const creditCols = volumeCols.filter((c) => c.endsWith("_credits"));
-    const hasFirstLast = volumeCols.includes("first_issue") || volumeCols.includes("last_issue");
-    // Nothing to migrate if the JSON columns are already gone (new schema).
-    if (creditCols.length === 0 && !hasFirstLast) return;
-
-    this.log("  Normalizing volume credits into join tables...");
-    try {
-      const creditTypes = ["character", "concept", "location", "object", "person", "team"];
-      const insertCredit = this.conn.prepare(
-        `INSERT OR REPLACE INTO cv_volume_credit
-           (volume_id, credit_type, position, credit_id, name, count, api_detail_url, site_detail_url)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      );
-      const insertRef = this.conn.prepare(
-        `INSERT OR REPLACE INTO cv_volume_issue_ref
-           (volume_id, ref_type, issue_id, key_order)
-         VALUES (?, ?, ?, ?)`
-      );
-      const setMask = this.conn.prepare(
-        "UPDATE cv_volume SET credits_presence = ? WHERE id = ?"
-      );
-      const deleteCredits = this.conn.prepare(
-        "DELETE FROM cv_volume_credit WHERE volume_id = ? AND credit_type = ?"
-      );
-      const deleteRef = this.conn.prepare(
-        "DELETE FROM cv_volume_issue_ref WHERE volume_id = ? AND ref_type = ?"
-      );
-
-      // Process in id-ordered batches so memory stays bounded (the DB has ~160k
-      // volumes and ~4M credit rows). The DELETE-then-INSERT per (volume, type)
-      // makes the migration idempotent on re-run.
-      const batchSize = 2000;
-      let minId = null;
-      let migrated = 0;
-      for (;;) {
-        const rows = this.conn.prepare(
-          `SELECT * FROM cv_volume WHERE id > ? ORDER BY id LIMIT ?`
-        ).all(minId ?? 0, batchSize);
-        if (rows.length === 0) break;
-
-        // One transaction per batch keeps the WAL bounded; a failure after a
-        // committed batch is safe because the migration is idempotent (the
-        // DELETE-then-INSERT re-runs cleanly) and the column drop runs only
-        // after every batch has committed.
-        this.conn.exec("BEGIN");
-        for (const row of rows) {
-          let mask = 0;
-          for (let i = 0; i < creditTypes.length; i++) {
-            const type = creditTypes[i];
-            const col = `${type}_credits`;
-            if (!volumeCols.includes(col)) continue;
-            const raw = row[col];
-            if (raw === null || raw === undefined) continue; // null: leave bit 0
-            mask |= 1 << i; // non-null (array, possibly []): set the bit
-            let entries;
-            try {
-              entries = JSON.parse(raw);
-            } catch {
-              continue;
-            }
-            if (!Array.isArray(entries)) continue;
-            deleteCredits.run(row.id, type);
-            entries.forEach((entry, position) => {
-              insertCredit.run(
-                row.id, type, position,
-                entry.id ?? null, entry.name ?? null, entry.count ?? null,
-                entry.api_detail_url ?? null, entry.site_detail_url ?? null
-              );
-            });
-          }
-
-          for (const [field, refType] of [["first_issue", "first"], ["last_issue", "last"]]) {
-            if (!volumeCols.includes(field)) continue;
-            const raw = row[field];
-            deleteRef.run(row.id, refType);
-            if (raw === null || raw === undefined) continue;
-            let ref;
-            try {
-              ref = JSON.parse(raw);
-            } catch {
-              continue;
-            }
-            if (!ref || typeof ref !== "object") continue;
-            insertRef.run(
-              row.id, refType,
-              ref.id ?? null, JSON.stringify(Object.keys(ref))
-            );
-          }
-
-          setMask.run(mask, row.id);
-          migrated++;
-        }
-        this.conn.exec("COMMIT");
-
-        minId = rows[rows.length - 1].id;
-        this.log(`  Migrated ${migrated} volumes...`);
-        if (rows.length < batchSize) break;
-      }
-
-      // Drop the now-redundant JSON columns to complete the normalization.
-      const dropNames = [...creditCols];
-      for (const f of ["first_issue", "last_issue"]) if (volumeCols.includes(f)) dropNames.push(f);
-      if (dropNames.length > 0) {
-        this.conn.exec("BEGIN");
-        for (const name of dropNames) {
-          this.conn.exec(`ALTER TABLE cv_volume DROP COLUMN ${name}`);
-        }
-        this.conn.exec("COMMIT");
-      }
-      this.log(`  Normalized volume credits for ${migrated} volumes.`);
-    } catch (e) {
-      try { this.conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
-      this.log(`  Warning: could not normalize volume credits: ${e.message}`, { force: true });
-    }
-  }
-
-  // ─── UPD-14: concept credit normalization ─────────────────────────────────
-
-  // The three concept relationship collections (issue_credits, movies,
-  // volume_credits) are stored in a join table so the server can generate them
-  // directly (SRV-26). Modeled on SRV-6c's cv_volume_credit, minus the count
-  // column (concept entries carry no count/role). No presence bitmask is needed:
-  // the live API never returns null for these (always an array), so the server
-  // emits [] for a concept with no rows. credit_id has no FK: movies have no
-  // local table (SRV-3), and issue/volume refs may be absent from the subset DB;
-  // the denormalized display fields are kept inline per the SRV-6 design note.
-  // There is no backfill: the collections were never stored on cv_concept, so a
-  // full concepts sync populates the table.
-  ensureConceptCreditTables() {
-    if (!this.conn) return;
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_concept_credit (
-        concept_id INTEGER NOT NULL,
-        credit_type TEXT NOT NULL,
-        position INTEGER NOT NULL,
-        credit_id INTEGER,
-        name TEXT,
-        api_detail_url TEXT,
-        site_detail_url TEXT,
-        PRIMARY KEY (concept_id, credit_type, position)
-      )
-    `);
-    this.conn.exec(`
-      CREATE INDEX IF NOT EXISTS idx_concept_credit_type
-        ON cv_concept_credit (credit_type, credit_id)
-    `);
-  }
+  // ─── Schema (UPD-17) ──────────────────────────────────────────────────────
+  // Schema creation and one-shot migrations live in src/migrate.js (migrate()),
+  // called from runSync. The FTS resource list stays here: rebuildFtsIndex uses it.
 
   // ─── SRV-5: FTS5 full-text search indexes ────────────────────────────────
 
-  // The seven resource tables, in the order the server searches them. Each is
+  // The ten resource tables, in the order the server searches them. Each is
   // indexed on the searchable text columns (name, aliases, deck, description);
   // the trigram tokenizer is case-insensitive and matches substrings, which is
   // the same semantics the server's legacy LIKE matching used (SRV-5).
   get FTS_RESOURCES() {
     // Derived from the RESOURCES registry (UPD-12) so the FTS indexes and the
-    // sync endpoints stay in lockstep (same seven tables, same order).
+    // sync endpoints stay in lockstep (same ten tables, same order).
     return RESOURCES.map((r) => ({ table: r.table, fts: r.fts }));
-  }
-
-  // Create the per-resource FTS5 trigram tables (external-content, keyed on the
-  // base table's id/rowid). Idempotent: only creates a table if it is missing.
-  // Only the text columns that actually exist on the base table are indexed.
-  ensureFtsTables() {
-    if (!this.conn) return;
-    for (const { table, fts } of this.FTS_RESOURCES) {
-      let exists;
-      try {
-        exists = this.conn.prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
-        ).get(table)?.name;
-      } catch {
-        exists = null;
-      }
-      if (!exists) continue; // base resource table absent (e.g. minimal DB)
-
-      const baseColumns = this.conn.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
-      if (!baseColumns.includes("id")) continue;
-      const columns = ["name", "aliases", "deck", "description"].filter((c) => baseColumns.includes(c));
-      if (columns.length === 0) continue;
-
-      const ftsExists = this.conn.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
-      ).get(fts)?.name;
-      if (ftsExists) continue; // already created; rebuilt in rebuildFtsIndex
-
-      try {
-        this.conn.exec(
-          `CREATE VIRTUAL TABLE ${fts} USING fts5(${columns.join(", ")}, ` +
-          `content='${table}', content_rowid='id', tokenize='trigram case_sensitive 0')`
-        );
-        this.log(`  Created ${fts} (${columns.join(", ")})`);
-      } catch (e) {
-        this.log(`  Warning: could not create ${fts}: ${e.message}`);
-      }
-    }
-  }
-
-  ensureMetadataTable() {
-    if (!this.conn) return;
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS cv_sync_metadata (
-        endpoint TEXT PRIMARY KEY,
-        last_sync_date TEXT NOT NULL,
-        last_sync_timestamp TEXT NOT NULL,
-        resume_state TEXT
-      )
-    `);
-    // Persistent record of rows the updater could not store (FK failures etc.)
-    this.conn.exec(`
-      CREATE TABLE IF NOT EXISTS sync_errors (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        table_name TEXT NOT NULL,
-        action TEXT NOT NULL,
-        error TEXT,
-        row_data TEXT,
-        created_at TEXT NOT NULL
-      )
-    `);
-    // Migration: add resume_state column to older DBs
-    const cols = this.conn.prepare("PRAGMA table_info(cv_sync_metadata)").all();
-    const names = cols.map((c) => c.name);
-    if (!names.includes("resume_state")) {
-      this.log("  Adding resume_state column to cv_sync_metadata...");
-      try {
-        this.conn.exec("ALTER TABLE cv_sync_metadata ADD COLUMN resume_state TEXT");
-      } catch (e) {
-        this.log(`  Warning: Could not add resume_state column: ${e.message}`);
-      }
-    }
   }
 
   // ─── Metadata ───────────────────────────────────────────────────────────
@@ -2107,11 +1674,10 @@ class ComicVineUpdater {
   }
 
   async runSync(startDate = null) {
-    this.ensureMetadataTable();
-    this.ensureResourceTables();
-    this.ensureVolumeCreditTables();
-    this.ensureConceptCreditTables();
-    this.ensureFtsTables();
+    // UPD-17: schema creation + one-shot migrations (src/migrate.js). Runs
+    // first so a new release's migration applies before any API call or
+    // sync-state mutation; a fatal migration error aborts the run.
+    migrate(this.conn, (message, opts) => this.log(message, opts));
 
     const endDate = todayStr();
 

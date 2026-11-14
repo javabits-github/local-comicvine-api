@@ -92,6 +92,12 @@ npm sync          # incremental sync (since the last sync date)
 npm sync:full     # one-time full refresh (no date filter; thousands of live API calls)
 ```
 
+The updater applies the schema migrations ([src/migrate.js](src/migrate.js)) at the start of every sync, so a new release's schema changes apply automatically on the next sync. To apply them without syncing (e.g. right after pulling a release), run:
+
+```powershell
+npm migrate       # apply schema migrations only (no API calls)
+```
+
 To sync a specific resource instead of all seven endpoints, pass `--resource <name>` (repeat it, or comma-separate several names):
 
 ```powershell
@@ -170,6 +176,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-11-14 — Schema migrations extracted into `src/migrate.js` (UPD-17)
+
+- **Context:** the updater's five `ensure*` methods mixed final-schema creation (`CREATE TABLE IF NOT EXISTS` — idempotent, needed for fresh databases) with one-shot migrations (ALTER/backfill/drop — versioned, historical), all inline in `runSync`. Schema changes were only testable via full mock syncs, and a migration failure entangled with resume logic mid-sync.
+- **Change:** a new [src/migrate.js](src/migrate.js) module with `migrate(conn, log)`: (1) idempotent final-schema CREATEs (metadata, the six resource tables, the join tables, the FTS5 indexes — the FTS `CREATE`s count as final schema, not migrations); (2) an ordered `{version, up}` list of the five one-shot migrations (v1 `resume_state` add, v2 SRV-6c volume-credit normalization, v3 UPD-13 concept `api_detail_url` drop, v4 UPD-11 legacy `api_detail_url` drops, v5 UPD-15 concept `first_appeared_in_issue` JSON→id), guarded by a `schema_version` stamp — only migrations newer than the stamp run, and the stamp advances only when a migration fully completes (a partial one re-runs on the next call; every migration is idempotent, so an un-stamped database runs all of them and is then stamped). The five `ensure*` methods are gone from [src/updater.js](src/updater.js) — `runSync` calls `migrate(conn, log)` first (a fatal migration error aborts before any API calls or sync-state mutation; the zero-friction self-healing is preserved, including the Docker cron deployment) — and `npm run migrate` runs the module standalone (`--db <path>`, default `./localcv.db`; no API calls, so no `.env`). New [test/migrate.test.js](test/migrate.test.js) tests the module directly: fresh DB → final schema + stamp, legacy fixture → upgraded, already-stamped → no-op, stamp-2 → only v3/v4/v5, CLI smoke tests; full suite 114 = 112 pass + 2 skip (the pre-existing `COMICVINE_API_KEY` validation skips).
+- **Gotcha / follow-up:** the stamp lives in a dedicated single-row `schema_version` table rather than a sentinel row in `cv_sync_metadata` (the TODO's wording): a sentinel row would appear in the server's `/api/status` `sync_metadata` array, and a `cv_*`-prefixed table in its `tables` object — both visible behavior changes requiring a server edit, which UPD-17 avoids. Prefix-less (like `sync_errors`), it is invisible to the server. One deliberate improvement: v5 (UPD-15) is now one atomic add/backfill/drop transaction — a failed backfill rolls the id-column add back too, so the server falls back to the JSON column (the pre-UPD-15 path) instead of reading an all-NULL id column. Feeds DB-3: at schema finalization `migrate()` shrinks to the CREATEs + stamp, and the next release deletes the historical blocks.
 
 #### 2026-11-14 — `api_detail_url` derived from the id for volume, issue, and person (UPD-11)
 
