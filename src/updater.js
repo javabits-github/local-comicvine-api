@@ -58,7 +58,7 @@ const RATE_LIMIT_BACKOFF_SECONDS = 60;
 
 // ─── Resources (UPD-12) ──────────────────────────────────────────────────────
 //
-// The ten endpoints runSync can sync, in the order they run. `name` is the
+// The eleven endpoints runSync can sync, in the order they run. `name` is the
 // endpoint (and the cv_sync_metadata key); `method` is the sync method;
 // `table` is the cv_* table; `stats` is the stats-key prefix (note: the
 // `people` endpoint reports under `persons_*`); `statsLabel` is the display
@@ -72,13 +72,14 @@ const RESOURCES = [
   { name: "teams",      method: "syncTeams",      label: "teams",       stats: "teams",      statsLabel: "Teams",       table: "cv_team",      fts: "cv_team_fts",      aliases: ["team", "cv_team"] },
   { name: "storyarcs",  method: "syncStoryarcs",  label: "story arcs",  stats: "storyarcs",  statsLabel: "Story arcs",   table: "cv_storyarc",  fts: "cv_storyarc_fts",  aliases: ["storyarc", "story_arc", "story_arcs", "cv_storyarc"] },
   { name: "concepts",   method: "syncConcepts",   label: "concepts",    stats: "concepts",   statsLabel: "Concepts",    table: "cv_concept",   fts: "cv_concept_fts",   aliases: ["concept", "cv_concept"] },
-  // SRV-3: the three remaining 404 resources (object stays open). Their live
-  // list endpoints return the scalar fields plus the relationship collections,
-  // so a single-phase list-paging sync (the teams/publishers pattern) is
-  // sufficient — no two-phase detail calls.
+  // SRV-3: the four 404 resources. Their live list endpoints return the
+  // scalar fields plus the relationship collections, so a single-phase
+  // list-paging sync (the teams/publishers pattern) is sufficient — no
+  // two-phase detail calls.
   { name: "characters", method: "syncCharacters", label: "characters",  stats: "characters", statsLabel: "Characters",  table: "cv_character", fts: "cv_character_fts", aliases: ["character", "cv_character"] },
   { name: "locations",  method: "syncLocations",  label: "locations",   stats: "locations",  statsLabel: "Locations",   table: "cv_location",  fts: "cv_location_fts",  aliases: ["location", "cv_location"] },
-  { name: "powers",     method: "syncPowers",     label: "powers",      stats: "powers",     statsLabel: "Powers",      table: "cv_power",     fts: "cv_power_fts",     aliases: ["power", "cv_power"] }
+  { name: "powers",     method: "syncPowers",     label: "powers",      stats: "powers",     statsLabel: "Powers",      table: "cv_power",     fts: "cv_power_fts",     aliases: ["power", "cv_power"] },
+  { name: "objects",    method: "syncObjects",    label: "objects",     stats: "objects",    statsLabel: "Objects",     table: "cv_object",    fts: "cv_object_fts",    aliases: ["object", "cv_object"] }
 ];
 
 // Resolve a user-supplied resource name (endpoint name, cv_* table name, or
@@ -183,7 +184,7 @@ class ComicVineUpdater {
     this.logCapture = options.logCapture || null;
     this.full = Boolean(options.full);
     // UPD-12: restrict the run to specific resources (RESOURCES registry
-    // entries). null/undefined = all ten.
+    // entries). null/undefined = all eleven.
     this.resources = options.resources || null;
     this.fetchFn = options.fetchFn || globalThis.fetch;
     // Injectable delays (tests pass 0 to skip the real waits).
@@ -202,6 +203,7 @@ class ComicVineUpdater {
       characters_added: 0, characters_updated: 0,
       locations_added: 0, locations_updated: 0,
       powers_added: 0, powers_updated: 0,
+      objects_added: 0, objects_updated: 0,
       api_calls: 0
     };
   }
@@ -319,13 +321,13 @@ class ComicVineUpdater {
 
   // ─── SRV-5: FTS5 full-text search indexes ────────────────────────────────
 
-  // The ten resource tables, in the order the server searches them. Each is
+  // The eleven resource tables, in the order the server searches them. Each is
   // indexed on the searchable text columns (name, aliases, deck, description);
   // the trigram tokenizer is case-insensitive and matches substrings, which is
   // the same semantics the server's legacy LIKE matching used (SRV-5).
   get FTS_RESOURCES() {
     // Derived from the RESOURCES registry (UPD-12) so the FTS indexes and the
-    // sync endpoints stay in lockstep (same ten tables, same order).
+    // sync endpoints stay in lockstep (same eleven tables, same order).
     return RESOURCES.map((r) => ({ table: r.table, fts: r.fts }));
   }
 
@@ -1436,6 +1438,95 @@ class ComicVineUpdater {
     }
 
     this.setEndpointLastSync("powers", endDate);
+  }
+
+  // SRV-3: single-phase list-paging sync (the teams/publishers pattern).
+  // Objects have the same live shape as locations (verified against the
+  // verbatim raw-API dump on 2026-11-14: 17 fields, domain prefix 4055).
+  // first_appeared_in_issue is stored as the issue id (the UPD-15 concept
+  // pattern); the collections are stored as JSON text (pre-SRV-6 pattern).
+  async syncObjects(startDate, endDate, full = false) {
+    this.log(`\n--- Syncing Objects ---${full ? " (FULL)" : ""}`);
+    if (!this.conn) return;
+
+    let offset = 0;
+    const limit = 100;
+
+    while (true) {
+      const params = {
+        field_list: "id,name,aliases,deck,description,start_year," +
+          "date_added,date_last_updated,image,site_detail_url," +
+          "count_of_issue_appearances,first_appeared_in_issue," +
+          "issue_credits,volume_credits,story_arc_credits,movies",
+        offset, limit
+      };
+      if (!full) params.filter = `date_last_updated:${startDate}|${endDate}`;
+      params.sort = "date_last_updated:asc";
+
+      const data = await this.apiCall("objects/", params);
+      if (!data) throw new Error("API call failed for objects");
+
+      const results = data.results || [];
+      if (results.length === 0) break;
+
+      this.conn.exec("BEGIN");
+      for (const object of results) {
+        const objectId = object.id;
+        if (!objectId) continue;
+
+        const image = object.image || null;
+        const imageUrl = image ? image.original_url : null;
+        const exists = this.conn.prepare("SELECT id FROM cv_object WHERE id = ?").get(objectId);
+
+        const firstAppearedId = object.first_appeared_in_issue?.id ?? null;
+
+        this.conn.prepare(`
+          INSERT INTO cv_object
+            (id, name, aliases, deck, description, start_year,
+             date_added, date_last_updated, image_url, site_detail_url,
+             first_appeared_in_issue_id, count_of_issue_appearances,
+             issue_credits, volume_credits, story_arc_credits, movies)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            aliases = excluded.aliases,
+            deck = excluded.deck,
+            description = excluded.description,
+            start_year = excluded.start_year,
+            date_added = excluded.date_added,
+            date_last_updated = excluded.date_last_updated,
+            image_url = excluded.image_url,
+            site_detail_url = excluded.site_detail_url,
+            first_appeared_in_issue_id = COALESCE(excluded.first_appeared_in_issue_id, cv_object.first_appeared_in_issue_id),
+            count_of_issue_appearances = excluded.count_of_issue_appearances,
+            issue_credits = excluded.issue_credits,
+            volume_credits = excluded.volume_credits,
+            story_arc_credits = excluded.story_arc_credits,
+            movies = excluded.movies
+        `).run(
+          objectId, jsonify(object.name), jsonify(object.aliases),
+          jsonify(object.deck), jsonify(object.description),
+          jsonify(object.start_year),
+          jsonify(object.date_added), jsonify(object.date_last_updated),
+          imageUrl, object.site_detail_url, firstAppearedId,
+          jsonify(object.count_of_issue_appearances),
+          jsonify(object.issue_credits), jsonify(object.volume_credits),
+          jsonify(object.story_arc_credits), jsonify(object.movies)
+        );
+
+        if (exists) this.stats.objects_updated++;
+        else this.stats.objects_added++;
+      }
+      this.conn.exec("COMMIT");
+
+      const total = data.number_of_total_results || 0;
+      this.log(`  Processed ${offset + results.length}/${total} objects`);
+
+      if (results.length < limit) break;
+      offset += limit;
+    }
+
+    this.setEndpointLastSync("objects", endDate);
   }
 
   // Fetch a single concept's detail from the live API (mirrors fetchVolumeDetails).

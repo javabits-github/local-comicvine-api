@@ -64,7 +64,7 @@ function inTransaction(conn, fn) {
   }
 }
 
-// The ten resource base tables, in the RESOURCES registry order (updater.js).
+// The eleven resource base tables, in the RESOURCES registry order (updater.js).
 // Kept in lockstep with that registry: when a resource is added there, add its
 // table here too (a new base table gets an FTS index on the next migrate).
 // migrate.js deliberately does not require updater.js (the updater requires
@@ -79,7 +79,8 @@ const FTS_BASE_TABLES = [
   { table: "cv_concept",   fts: "cv_concept_fts" },
   { table: "cv_character", fts: "cv_character_fts" },
   { table: "cv_location",  fts: "cv_location_fts" },
-  { table: "cv_power",     fts: "cv_power_fts" }
+  { table: "cv_power",     fts: "cv_power_fts" },
+  { table: "cv_object",    fts: "cv_object_fts" }
 ];
 
 // ─── Final schema: idempotent CREATEs ────────────────────────────────────────
@@ -119,7 +120,7 @@ function ensureMetadataTables(conn, log) {
   `);
 }
 
-// The six resource tables the Node updater creates (the four legacy tables —
+// The seven resource tables the Node updater creates (the four legacy tables —
 // cv_publisher/cv_issue/cv_volume/cv_person — are Python-updater heritage and
 // are never created here; see DB-3). The CREATEs describe the final schema:
 // cv_concept already carries first_appeared_in_issue_id and no
@@ -154,11 +155,11 @@ function ensureResourceTables(conn, log) {
       count_of_issue_appearances INTEGER, start_year TEXT
     )
   `);
-  // SRV-3: the three remaining 404 resources (object stays open). The
-  // relationship collections are stored as JSON text (the pre-SRV-6
-  // denormalized pattern); their normalization belongs with SRV-6.
-  // first_appeared_in_issue is stored as the issue id (the UPD-15 concept
-  // pattern) so the server can derive the object and join cv_issue.
+  // SRV-3: the four 404 resources. The relationship collections are stored as
+  // JSON text (the pre-SRV-6 denormalized pattern); their normalization
+  // belongs with SRV-6. first_appeared_in_issue is stored as the issue id (the
+  // UPD-15 concept pattern) so the server can derive the object and join
+  // cv_issue.
   conn.exec(`
     CREATE TABLE IF NOT EXISTS cv_character (
       id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, real_name TEXT,
@@ -188,10 +189,21 @@ function ensureResourceTables(conn, log) {
       site_detail_url TEXT, characters TEXT
     )
   `);
+  // SRV-3: object — the same shape as location (17 fields, verified against
+  // the verbatim raw-API dump on 2026-11-14).
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_object (
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT,
+      description TEXT, start_year TEXT, date_added TEXT, date_last_updated TEXT,
+      image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER,
+      count_of_issue_appearances INTEGER,
+      issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, movies TEXT
+    )
+  `);
   // Seed last_sync_date for new endpoints at the raw-dump snapshot date.
   const snapshot = "2026-01-22";
   const timestamp = new Date().toISOString();
-  for (const endpoint of ["teams", "storyarcs", "concepts", "characters", "locations", "powers"]) {
+  for (const endpoint of ["teams", "storyarcs", "concepts", "characters", "locations", "objects", "powers"]) {
     conn.prepare(
       `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
        VALUES (?, ?, ?)
@@ -250,7 +262,7 @@ function ensureJoinTables(conn, log) {
 }
 
 // SRV-5: FTS5 full-text search indexes (final schema, not a migration). The
-// ten resource tables, in the order the server searches them. Each is indexed
+// eleven resource tables, in the order the server searches them. Each is indexed
 // on the searchable text columns (name, aliases, deck, description); the
 // trigram tokenizer is case-insensitive and matches substrings, which is the
 // same semantics the server's legacy LIKE matching used (SRV-5).

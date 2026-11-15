@@ -243,6 +243,22 @@ function makeMockFetch() {
           characters: [{ id: 800, name: "Test Character" }]
         }];
       }
+    } else if (ep.includes("/objects/")) {
+      if (offset === 0) {
+        results = [{
+          id: 960, name: "Test Object", aliases: "TO",
+          deck: "An object", description: "An object desc", start_year: "1990",
+          date_added: "2020-01-01 00:00:00", date_last_updated: "2026-01-01 00:00:00",
+          image: { original_url: "https://example.com/obj.png" },
+          site_detail_url: "https://example.com/site/960",
+          count_of_issue_appearances: 3,
+          first_appeared_in_issue: { id: 4001, name: "Test Series #1" },
+          issue_credits: [{ id: 4001, name: "Test Series #1" }],
+          volume_credits: [],
+          story_arc_credits: [],
+          movies: []
+        }];
+      }
     }
     return { status: 200, ok: true, json: async () => ({ status_code: 1, results, number_of_total_results: results.length }) };
   };
@@ -381,6 +397,15 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.equal(power.aliases, "TP");
   assert.equal(JSON.parse(power.characters)[0].name, "Test Character");
 
+  // SRV-3: object
+  const object = db.prepare("SELECT * FROM cv_object WHERE id=960").get();
+  assert.ok(object, "object row should exist");
+  assert.equal(object.name, "Test Object");
+  assert.equal(object.start_year, "1990");
+  assert.equal(object.count_of_issue_appearances, 3);
+  assert.equal(object.first_appeared_in_issue_id, 4001);
+  assert.equal(JSON.parse(object.issue_credits)[0].name, "Test Series #1");
+
   // Metadata
   const meta = db.prepare("SELECT * FROM cv_sync_metadata WHERE endpoint='publishers'").get();
   assert.ok(meta);
@@ -395,6 +420,7 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.ok(ftsTables.includes("cv_volume_fts"), `expected cv_volume_fts, got ${ftsTables.join(", ")}`);
   assert.ok(ftsTables.includes("cv_issue_fts"));
   assert.ok(ftsTables.includes("cv_concept_fts"), `expected cv_concept_fts, got ${ftsTables.join(", ")}`);
+  assert.ok(ftsTables.includes("cv_object_fts"), `expected cv_object_fts, got ${ftsTables.join(", ")}`);
   const ftsRows = db.prepare("SELECT COUNT(*) AS c FROM cv_volume_fts").get().c;
   assert.ok(ftsRows >= 1, `expected cv_volume_fts to be populated, got ${ftsRows}`);
   const conceptFtsRows = db.prepare("SELECT COUNT(*) AS c FROM cv_concept_fts").get().c;

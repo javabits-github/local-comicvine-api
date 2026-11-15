@@ -1909,9 +1909,9 @@ test("emits every stored issue field (SRV-19)", async () => {
   }
 });
 
-// ─── SRV-3: character, location, power ───────────────────────────────────────
+// ─── SRV-3: character, location, power, object ──────────────────────────────
 
-test("SRV-3: serves the three new resources (list, detail, search, sort, field_list)", async () => {
+test("SRV-3: serves the four new resources (list, detail, search, sort, field_list)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-srv3-test-"));
   const dbPath = path.join(directory, "srv3.db");
   const db = new DatabaseSync(dbPath);
@@ -1919,6 +1919,7 @@ test("SRV-3: serves the three new resources (list, detail, search, sort, field_l
   db.exec("CREATE TABLE cv_character (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, real_name TEXT, birth TEXT, gender INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER, count_of_issue_appearances INTEGER, publisher TEXT, origin TEXT, teams TEXT, movies TEXT, powers TEXT, creators TEXT, issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, issues_died_in TEXT, character_enemies TEXT, character_friends TEXT, team_enemies TEXT, team_friends TEXT)");
   db.exec("CREATE TABLE cv_location (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, start_year TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER, count_of_issue_appearances INTEGER, issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, movies TEXT)");
   db.exec("CREATE TABLE cv_power (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, characters TEXT)");
+  db.exec("CREATE TABLE cv_object (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, start_year TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER, count_of_issue_appearances INTEGER, issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, movies TEXT)");
   db.prepare("INSERT INTO cv_issue (id, name, issue_number) VALUES (?, ?, ?)").run(4001, "Test Series #1", "1");
   db.prepare("INSERT INTO cv_character (id, name, aliases, real_name, gender, deck, description, date_added, date_last_updated, image_url, site_detail_url, first_appeared_in_issue_id, count_of_issue_appearances, publisher, origin, teams, powers, issues_died_in, character_enemies, character_friends, team_enemies, team_friends, movies, creators, issue_credits, volume_credits, story_arc_credits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run(1253, "Lightning Lad", "Garth Ranzz", "Garth Ranzz", 1, "A Legionnaire", "A lightning controller", "2008-06-06 11:00:00", "2026-01-01 00:00:00", "https://example.test/lad.jpg", "https://example.test/lad/", 4001, 180, J({ id: 31, name: "Marvel" }), J({ id: 3, name: "Alien" }), J([{ id: 19241, name: "Legion of Super-Heroes" }]), J([{ id: 1, name: "Flight" }]), J([]), J([]), J([]), J([]), J([]), J([]), J([]), J([{ id: 4001, name: "Test Series #1" }]), J([]), J([]));
@@ -1932,6 +1933,11 @@ test("SRV-3: serves the three new resources (list, detail, search, sort, field_l
     .run(1, "Flight", "Flying", "The ability to fly", "2008-06-06 11:00:00", "2026-01-01 00:00:00", "https://example.test/flight.jpg", "https://example.test/flight/", J([{ id: 1253, name: "Lightning Lad" }]));
   db.prepare("INSERT INTO cv_power (id, name, date_added) VALUES (?, ?, ?)")
     .run(2, "Super Strength", "1899-01-01 00:00:00");
+  // SRV-3: object (15073 "Cerebro" is a real object from the raw-API dump).
+  db.prepare("INSERT INTO cv_object (id, name, aliases, deck, description, start_year, date_added, date_last_updated, image_url, site_detail_url, first_appeared_in_issue_id, count_of_issue_appearances, issue_credits, movies) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(15073, "Cerebro", "Cerebra", "A large computer device", "Inside the X-Mansion", "1964", "2008-06-06 11:00:00", "2026-01-01 00:00:00", "https://example.test/cerebro.jpg", "https://example.test/cerebro/", 4001, 657, J([{ id: 4001, name: "Test Series #1" }]), J([]));
+  db.prepare("INSERT INTO cv_object (id, name, date_added) VALUES (?, ?, ?)")
+    .run(15074, "Second Object", "1899-01-01 00:00:00");
   db.close();
 
   const server = createApiServer(dbPath, () => {});
@@ -2048,13 +2054,51 @@ test("SRV-3: serves the three new resources (list, detail, search, sort, field_l
     const powSearch = await (await fetch(`${url}/api/search/?query=Flight&resources=power`)).json();
     assert.equal(powSearch.number_of_total_results, 1);
     assert.equal(powSearch.results[0].id, 1);
+
+    // Object list: full shape (same live shape as location).
+    const objList = await (await fetch(`${url}/api/objects?format=json`)).json();
+    assert.equal(objList.number_of_total_results, 2);
+    assert.deepEqual(objList.results.map((r) => r.id), [15073, 15074]);
+    const cerebro = objList.results[0];
+    assert.equal(cerebro.api_detail_url, "https://comicvine.gamespot.com/api/object/4055-15073/");
+    assert.equal(Object.hasOwn(cerebro, "image_url"), false);
+    assert.equal(cerebro.image.original_url, "https://example.test/cerebro.jpg");
+    assert.equal(cerebro.start_year, "1964");
+    assert.equal(cerebro.count_of_issue_appearances, 657);
+    assert.deepEqual(cerebro.first_appeared_in_issue, {
+      api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_issue/4000-4001/",
+      id: 4001,
+      name: "Test Series #1",
+      issue_number: "1"
+    });
+    assert.deepEqual(cerebro.issue_credits, [{ id: 4001, name: "Test Series #1" }]);
+    assert.deepEqual(cerebro.movies, []);
+    // The second object's NULL columns emit null / [] (the live API shape).
+    const secondObj = objList.results[1];
+    assert.equal(secondObj.first_appeared_in_issue, null);
+    assert.deepEqual(secondObj.issue_credits, []);
+    assert.equal(secondObj.image, null);
+
+    // Object detail + sort + search.
+    const objDetail = await (await fetch(`${url}/api/object/4055-15073/?field_list=id,name,start_year,deck`)).json();
+    assert.deepEqual(objDetail.results, {
+      id: 15073,
+      name: "Cerebro",
+      start_year: "1964",
+      deck: "A large computer device"
+    });
+    const objSorted = await (await fetch(`${url}/api/objects?sort=count_of_issue_appearances:desc&limit=1&field_list=id`)).json();
+    assert.deepEqual(objSorted.results, [{ id: 15073 }]);
+    const objSearch = await (await fetch(`${url}/api/search/?query=Cerebro&resources=object`)).json();
+    assert.equal(objSearch.number_of_total_results, 1);
+    assert.equal(objSearch.results[0].id, 15073);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("SRV-3: a resource without its table still 404s (object remains open)", async () => {
+test("SRV-3: a resource without its table still 404s (tables absent in the fixture)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-srv3-404-test-"));
   const dbPath = path.join(directory, "srv3-404.db");
   const db = new DatabaseSync(dbPath);

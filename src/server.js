@@ -46,6 +46,11 @@ const sortableLocationFields = new Set([
   "aliases", "count_of_issue_appearances", "date_added", "date_last_updated",
   "deck", "description", "id", "name", "site_detail_url", "start_year"
 ]);
+// SRV-3: object has the same live shape as location, so the same sortable set.
+const sortableObjectFields = new Set([
+  "aliases", "count_of_issue_appearances", "date_added", "date_last_updated",
+  "deck", "description", "id", "name", "site_detail_url", "start_year"
+]);
 const sortablePowerFields = new Set([
   "aliases", "date_added", "date_last_updated", "description", "id", "name",
   "site_detail_url"
@@ -76,7 +81,8 @@ const sortableFieldsByResource = {
   concept: sortableConceptFields,
   character: sortableCharacterFields,
   location: sortableLocationFields,
-  power: sortablePowerFields
+  power: sortablePowerFields,
+  object: sortableObjectFields
 };
 
 // SRV-1: the default sort column each list endpoint uses when the client does not
@@ -93,7 +99,8 @@ const defaultSortByResource = {
   concept: "id",
   character: "id",
   location: "id",
-  power: "id"
+  power: "id",
+  object: "id"
 };
 
 // Per-resource field allowlist and relationship sets live in fieldConfig.js, shared
@@ -580,6 +587,31 @@ function buildResult(row, singular) {
   }
   return result;
   }
+  // SRV-3: object (domain prefix 4055). Same live shape as location.
+  if (singular === "object") {
+  const result = { id: row.id, name: row.name };
+  result.api_detail_url = buildApiDetailUrl("object", row.id);
+  for (const field of ["aliases", "deck", "description", "date_added", "date_last_updated", "site_detail_url", "start_year"]) {
+   if (has(field)) result[field] = row[field];
+  }
+  if (has("count_of_issue_appearances")) result.count_of_issue_appearances = row.count_of_issue_appearances;
+  if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
+  if (has("first_appeared_in_issue_id")) {
+    const issueId = row.first_appeared_in_issue_id;
+    result.first_appeared_in_issue = (issueId === null || issueId === undefined)
+      ? null
+      : {
+        api_detail_url: buildApiDetailUrl("first_appeared_in_issue", issueId),
+        id: issueId,
+        name: row.first_appeared_issue_name ?? null,
+        issue_number: row.first_appeared_issue_number ?? null
+      };
+  }
+  for (const field of ["issue_credits", "volume_credits", "story_arc_credits", "movies"]) {
+   result[field] = has(field) ? (parseJsonColumn(row[field]) ?? []) : [];
+  }
+  return result;
+  }
   // SRV-3: power (domain prefix 4035). No deck, appearance count, or
   // first_appeared_in_issue.
   if (singular === "power") {
@@ -689,8 +721,8 @@ function buildResourceConfig(database, resource) {
   // volume-join pattern. Added only when the id column exists and cv_issue is
   // available; otherwise the reference's display fields degrade to null (the
   // SRV-6c behavior for a ref whose row isn't in the subset DB).
-  // SRV-3: character and location use the same id-join pattern as concept.
-  if ((singular === "concept" || singular === "character" || singular === "location") && has("first_appeared_in_issue_id") && tableColumns(database, "cv_issue").size > 0) {
+  // SRV-3: character, location, and object use the same id-join pattern as concept.
+  if ((singular === "concept" || singular === "character" || singular === "location" || singular === "object") && has("first_appeared_in_issue_id") && tableColumns(database, "cv_issue").size > 0) {
    from += " LEFT JOIN cv_issue i ON i.id = p.first_appeared_in_issue_id";
    selectExtra += ", i.name AS first_appeared_issue_name, i.issue_number AS first_appeared_issue_number";
   }

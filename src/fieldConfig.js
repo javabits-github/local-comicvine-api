@@ -21,6 +21,9 @@ const DOMAIN_PREFIXES = {
   character: "4005",
   location: "4020",
   power: "4035",
+  // SRV-3: object, verified against the verbatim raw-API dump on 2026-11-14
+  // (every stored api_detail_url is …/api/object/4055-<id>/).
+  object: "4055",
   // UPD-15: the first_appeared_in_issue reference's api_detail_url uses the
   // resource-type segment `first_appeared_in_issue` (not `issue`) with the same
   // 4000 numeric prefix — …/api/first_appeared_in_issue/4000-<id>/. Verified
@@ -101,6 +104,15 @@ const locationFields = new Set([
   "story_arc_credits", "volume_credits"
 ]);
 const locationRelationshipFields = new Set(["issue_credits", "movies", "story_arc_credits", "volume_credits"]);
+// SRV-3: object has the same live shape as location (verified against the
+// verbatim raw-API dump on 2026-11-14: 17 fields, same four collections).
+const objectFields = new Set([
+  "aliases", "api_detail_url", "count_of_issue_appearances", "date_added",
+  "date_last_updated", "deck", "description", "first_appeared_in_issue", "id",
+  "image", "issue_credits", "movies", "name", "site_detail_url", "start_year",
+  "story_arc_credits", "volume_credits"
+]);
+const objectRelationshipFields = new Set(["issue_credits", "movies", "story_arc_credits", "volume_credits"]);
 const powerFields = new Set([
   "aliases", "api_detail_url", "characters", "date_added", "date_last_updated",
   "description", "id", "image", "name", "site_detail_url"
@@ -153,10 +165,11 @@ const resourceConfig = {
   publisher: { fields: publisherFields, relationships: publisherRelationshipFields },
   person: { fields: personFields, relationships: personRelationshipFields },
   issue: { fields: issueFields, relationships: issueRelationshipFields },
-  // SRV-3: the three new resources.
+  // SRV-3: the four new resources.
   character: { fields: characterFields, relationships: characterRelationshipFields },
   location: { fields: locationFields, relationships: locationRelationshipFields },
-  power: { fields: powerFields, relationships: powerRelationshipFields }
+  power: { fields: powerFields, relationships: powerRelationshipFields },
+  object: { fields: objectFields, relationships: objectRelationshipFields }
 };
 
 module.exports = { resourceConfig, API_BASE_URL, DOMAIN_PREFIXES, buildApiDetailUrl };

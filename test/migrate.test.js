@@ -89,17 +89,17 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     assert.ok(tables.has("cv_sync_metadata"));
     assert.ok(tables.has("sync_errors"));
     assert.ok(tables.has("schema_version"));
-    // The six resource tables the Node updater creates.
-    for (const t of ["cv_team", "cv_storyarc", "cv_concept", "cv_character", "cv_location", "cv_power"]) {
+    // The seven resource tables the Node updater creates.
+    for (const t of ["cv_team", "cv_storyarc", "cv_concept", "cv_character", "cv_location", "cv_power", "cv_object"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // The join tables.
     for (const t of ["cv_volume_credit", "cv_volume_issue_ref", "cv_concept_credit"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
-    // FTS indexes for the six created resource tables (the four legacy base
+    // FTS indexes for the seven created resource tables (the four legacy base
     // tables are absent, so they get no FTS table).
-    for (const t of ["cv_team_fts", "cv_storyarc_fts", "cv_concept_fts", "cv_character_fts", "cv_location_fts", "cv_power_fts"]) {
+    for (const t of ["cv_team_fts", "cv_storyarc_fts", "cv_concept_fts", "cv_character_fts", "cv_location_fts", "cv_power_fts", "cv_object_fts"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // The four legacy tables are Python-updater heritage: never created here.
@@ -111,9 +111,9 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     assert.ok(conceptCols.includes("first_appeared_in_issue_id"));
     assert.ok(!conceptCols.includes("api_detail_url"));
     assert.ok(!conceptCols.includes("first_appeared_in_issue"));
-    // The six newer endpoints are seeded at the raw-dump snapshot date.
+    // The seven newer endpoints are seeded at the raw-dump snapshot date.
     const endpoints = db.prepare("SELECT endpoint FROM cv_sync_metadata ORDER BY endpoint").all().map((r) => r.endpoint);
-    assert.deepEqual(endpoints, ["characters", "concepts", "locations", "powers", "storyarcs", "teams"]);
+    assert.deepEqual(endpoints, ["characters", "concepts", "locations", "objects", "powers", "storyarcs", "teams"]);
     assert.equal(readSchemaVersion(db), 5);
     db.close();
   } finally {
