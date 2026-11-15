@@ -176,13 +176,52 @@ function parseGender(value) {
 // table, so the server can distinguish an empty [] from a null collection.
 const VOLUME_CREDIT_TYPES = ["character", "concept", "location", "object", "person", "team"];
 
+// SRV-24: the live API names the volume credit collections by the plural of the
+// credit type (characters, concepts, locations, objects, people) — not the *_credits
+// names the JSON columns used. `team` is intentionally absent: the live API emits no
+// team collection for volumes (verified against the raw-API dump). Maps the stored
+// credit_type (join path) to the live output field name.
+const VOLUME_CREDIT_FIELDS = {
+  character: "characters",
+  concept: "concepts",
+  location: "locations",
+  object: "objects",
+  person: "people"
+};
+
+// SRV-24: the same mapping keyed by the legacy JSON column name (character_credits,
+// …) for the buildResult fallback path, which reads the *_credits TEXT columns.
+const VOLUME_CREDIT_COLUMNS = Object.fromEntries(
+  Object.entries(VOLUME_CREDIT_FIELDS).map(([type, field]) => [`${type}_credits`, field])
+);
+
+// SRV-24: the credit entry's `count` is stored as TEXT (the January dump's string
+// form) but the current live API returns a number, so coerce on output. NULL stays
+// null; a non-numeric value passes through so a stray value never breaks a response.
+function parseCount(value) {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : value;
+}
+
+// SRV-24: coerce a parsed JSON credit entry's `count` to a number (the current live
+// shape). Only touches entries that have a `count` key, so entries without one (test
+// fixtures) are unchanged; the entry's key order is preserved.
+function coerceCreditCount(credit) {
+  if (!credit || typeof credit !== "object" || !("count" in credit)) return credit;
+  const result = { ...credit };
+  result.count = parseCount(credit.count);
+  return result;
+}
+
 // Rebuild a credit entry with the exact key order the live API emitted
-// (id, name, count, api_detail_url, site_detail_url) so serialized output is unchanged.
+// (id, name, count, api_detail_url, site_detail_url). SRV-24: count is coerced to a
+// number (the current live shape); the January dump stored it as a string.
 function creditRowToObject(row) {
   return {
     id: row.credit_id,
     name: row.name,
-    count: row.count,
+    count: parseCount(row.count),
     api_detail_url: row.api_detail_url,
     site_detail_url: row.site_detail_url
   };
@@ -225,7 +264,10 @@ function buildVolumeResult(row, database) {
   }
   const mask = row.credits_presence ?? 0;
   VOLUME_CREDIT_TYPES.forEach((type, i) => {
-    const field = `${type}_credits`;
+    // SRV-24: emit under the live plural name; `team` has no live collection, so
+    // its bit is simply not emitted (the live API returns no team field for volumes).
+    const field = VOLUME_CREDIT_FIELDS[type];
+    if (!field) return;
     result[field] = mask & (1 << i)
       ? (creditsByType[type] ?? []).map(creditRowToObject)
       : null;
@@ -313,8 +355,11 @@ function buildConceptResult(row, database) {
 function buildResult(row, singular) {
   const has = (name) => Object.hasOwn(row, name);
   if (singular === "volume") {
+  // SRV-24: the live API's publisher ref is {id, name, api_detail_url}; the join
+  // selects the publisher's name but not its URL, so derive api_detail_url from the
+  // id (SRV-21 pattern). The live key order is id, name, api_detail_url.
   const publisher = has("publisher_id") && row.publisher_id !== null
-     ? { id: row.publisher_id, name: row.publisher_name ?? null }
+     ? { id: row.publisher_id, name: row.publisher_name ?? null, api_detail_url: buildApiDetailUrl("publisher", row.publisher_id) }
      : null;
   const result = {
     id: row.id,
@@ -336,8 +381,14 @@ function buildResult(row, singular) {
   for (const field of ["deck", "date_added", "date_last_updated"]) {
    if (has(field)) result[field] = row[field];
    }
-  for (const credit of ["character_credits", "concept_credits", "location_credits", "object_credits", "person_credits", "team_credits"]) {
-  if (has(credit)) result[credit] = parseCredits(row[credit]);
+  // SRV-24: the stored *_credits JSON columns map to the live plural collection
+  // names (characters, concepts, …); team_credits has no live equivalent and is
+  // dropped. count is coerced to a number (the current live shape).
+  for (const [column, field] of Object.entries(VOLUME_CREDIT_COLUMNS)) {
+  if (has(column)) {
+    const parsed = parseCredits(row[column]);
+    result[field] = Array.isArray(parsed) ? parsed.map(coerceCreditCount) : parsed;
+  }
   }
   // first_issue/last_issue are stored as JSON objects, like first_appeared_in_issue.
   for (const field of ["first_issue", "last_issue"]) {

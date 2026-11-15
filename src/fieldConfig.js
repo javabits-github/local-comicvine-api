@@ -41,15 +41,17 @@ function buildApiDetailUrl(singular, id) {
   return `${API_BASE_URL}${singular}/${prefix}-${id}/`;
 }
 
+// SRV-24: the credit collections use the live plural names (characters, concepts,
+// locations, objects, people) — not the *_credits names the JSON columns used. The
+// live API emits no team collection for volumes, so team_credits is dropped.
 const volumeFields = new Set([
-  "aliases", "api_detail_url", "count_of_issues", "date_added", "date_last_updated",
-  "character_credits", "concept_credits", "deck", "description", "first_issue", "id",
-  "image", "issues", "last_issue", "location_credits", "name", "object_credits",
-  "person_credits", "publisher", "site_detail_url", "start_year", "team_credits"
+  "aliases", "api_detail_url", "characters", "concepts", "count_of_issues", "date_added",
+  "date_last_updated", "deck", "description", "first_issue", "id", "image", "issues",
+  "last_issue", "locations", "name", "objects", "people", "publisher", "site_detail_url",
+  "start_year"
 ]);
 const volumeCreditFields = new Set([
-  "character_credits", "concept_credits", "issues", "location_credits", "object_credits",
-  "person_credits", "team_credits"
+  "characters", "concepts", "issues", "locations", "objects", "people"
 ]);
 // SRV-22: the live API emits the team's appearance count and disbanded collection
 // under its typo names; the allowlist uses the live names so field_list matches

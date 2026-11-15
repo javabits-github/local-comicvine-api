@@ -263,6 +263,65 @@ test("builds volume first/last issue refs from the cv_issue join (SRV-6c)", asyn
   }
 });
 
+test("emits volume credit collections under live names with numeric count and publisher URL (SRV-24)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-srv24-test-"));
+  const dbPath = path.join(directory, "srv24.db");
+  const db = new DatabaseSync(dbPath);
+  db.exec("CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT)");
+  db.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, api_detail_url TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, credits_presence INTEGER)");
+  db.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, api_detail_url TEXT, site_detail_url TEXT)");
+  db.exec("CREATE TABLE cv_volume_credit (volume_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, count TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (volume_id, credit_type, position))");
+  db.exec("CREATE TABLE cv_volume_issue_ref (volume_id INTEGER NOT NULL, ref_type TEXT NOT NULL, issue_id INTEGER, key_order TEXT, PRIMARY KEY (volume_id, ref_type))");
+  db.prepare("INSERT INTO cv_publisher (id, name) VALUES (?, ?)").run(364, "Dark Horse Comics");
+  // credits_presence bit 0 (character) + bit 4 (person) = 1 + 16 = 17, so
+  // characters/people are present and concepts/locations/objects are null.
+  db.prepare("INSERT INTO cv_volume (id, name, publisher_id, credits_presence) VALUES (?, ?, ?, ?)").run(1, "Witchblade", 364, 17);
+  // A character credit with a string count (the January dump's storage form) and a
+  // person credit; the live API returns no team collection for volumes.
+  db.prepare("INSERT INTO cv_volume_credit (volume_id, credit_type, position, credit_id, name, count, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(1, "character", 0, 1, "Sara Pezzini", "2", "https://comicvine.gamespot.com/api/character/4005-1/", "https://example.test/sara/");
+  db.prepare("INSERT INTO cv_volume_credit (volume_id, credit_type, position, credit_id, name, count, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(1, "person", 0, 200, "Jane Doe", "1", "https://comicvine.gamespot.com/api/person/4040-200/", "https://example.test/jane/");
+  db.close();
+
+  const srv = createApiServer(dbPath, () => {});
+  await new Promise((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${srv.address().port}`;
+
+  try {
+    const result = (await (await fetch(`${url}/api/volume/4050-1/`)).json()).results;
+
+    // SRV-24: the collections use the live plural names (not *_credits).
+    assert.deepEqual(result.characters, [{
+      id: 1, name: "Sara Pezzini", count: 2,
+      api_detail_url: "https://comicvine.gamespot.com/api/character/4005-1/",
+      site_detail_url: "https://example.test/sara/"
+    }]);
+    assert.deepEqual(result.people, [{
+      id: 200, name: "Jane Doe", count: 1,
+      api_detail_url: "https://comicvine.gamespot.com/api/person/4040-200/",
+      site_detail_url: "https://example.test/jane/"
+    }]);
+    // count is a number (the current live shape), not the January string.
+    assert.equal(typeof result.characters[0].count, "number");
+    // The live API emits no team collection for volumes.
+    assert.equal(Object.hasOwn(result, "teams"), false);
+    assert.equal(Object.hasOwn(result, "team_credits"), false);
+    // The absent collections (presence bit 0) are null, matching the live API.
+    assert.equal(result.concepts, null);
+    assert.equal(result.locations, null);
+    assert.equal(result.objects, null);
+    // SRV-24: the publisher ref includes the derived api_detail_url.
+    assert.deepEqual(result.publisher, {
+      id: 364, name: "Dark Horse Comics",
+      api_detail_url: "https://comicvine.gamespot.com/api/publisher/4010-364/"
+    });
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("supports volume field selection, sorting, and date range filters", async () => {
   const sorted = await fetch(`${baseUrl}/api/volumes?sort=name:desc&limit=1&field_list=id,name`);
   const sortedBody = await sorted.json();
@@ -309,7 +368,10 @@ test("supports volume JSON, XML, and JSONP formats", async () => {
 });
 
 test("serves singular volume details with field_list and requested credit fields", async () => {
-  const fields = "id,name,character_credits,concept_credits,team_credits";
+  // SRV-24: the live plural collection names (characters, concepts, people); the
+  // live API emits no team collection for volumes, so team_credits is not a valid
+  // field_list target and is filtered out of the projection.
+  const fields = "id,name,characters,concepts,people,team_credits";
   const response = await fetch(`${baseUrl}/api/volume/4050-7300/?format=json&field_list=${fields}`);
   const body = await response.json();
 
@@ -317,10 +379,12 @@ test("serves singular volume details with field_list and requested credit fields
   assert.deepEqual(body.results, {
     id: 7300,
     name: "Witchblade",
-    character_credits: [{ id: 1, name: "Sara Pezzini" }],
-    concept_credits: [],
-    team_credits: [{ id: 2, name: "Witchblade Team" }]
+    characters: [{ id: 1, name: "Sara Pezzini" }],
+    concepts: [],
+    people: []
   });
+  // team_credits is not a live volume field, so it is dropped from the projection.
+  assert.equal(Object.hasOwn(body.results, "team_credits"), false);
 
   const apiAlias = await fetch(`${baseUrl}/api/volume/4050-7300/?field_list=id,name`);
   const apiAliasBody = await apiAlias.json();
@@ -1209,7 +1273,8 @@ test("serves normalized localcv tables and reports missing resources cleanly", a
     assert.deepEqual(volumeBody.results[0], {
       id: 7300,
       name: "Witchblade",
-      publisher: { id: 31, name: "Top Cow" },
+      // SRV-24: the publisher ref now includes the derived api_detail_url.
+      publisher: { id: 31, name: "Top Cow", api_detail_url: "https://comicvine.gamespot.com/api/publisher/4010-31/" },
       image: expectedImage
     });
 
@@ -1448,8 +1513,10 @@ test("diffs detail responses against the live API in validation mode", { skip: !
     site_detail_url: "https://example.test/witchblade/",
     date_added: "1995-01-01 00:00:00",
     date_last_updated: "2020-04-15 10:00:00",
-    character_credits: [{ id: 1, name: "Sara Pezzini" }],
-    team_credits: [{ id: 2, name: "Witchblade Team" }]
+    // SRV-24: the live API names the volume credit collection `characters` (and
+    // emits no team collection for volumes), so the fake live entity uses the live
+    // names to match the local output.
+    characters: [{ id: 1, name: "Sara Pezzini" }]
   };
   const validateServer = createApiServer(databasePath, () => {}, {
     validate: true,
@@ -1472,7 +1539,7 @@ test("diffs detail responses against the live API in validation mode", { skip: !
     // `name` differs; date_added/date_last_updated and credits are ignored.
     assert.ok(diffFields.includes("name"));
     assert.ok(!diffFields.includes("date_added"));
-    assert.ok(!diffFields.includes("character_credits"));
+    assert.ok(!diffFields.includes("characters"));
   } finally {
     await new Promise((resolve) => validateServer.close(resolve));
   }
