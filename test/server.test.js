@@ -880,6 +880,54 @@ test("builds team collections from the cv_team_credit join and scalar refs from 
   }
 });
 
+test("builds person collections from the cv_person_credit join (SRV-6d)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-person-join-test-"));
+  const joinDatabasePath = path.join(directory, "person-join.db");
+  const joinDatabase = new DatabaseSync(joinDatabasePath);
+  // SRV-6d: the four JSON collection columns are dropped by the v9 migration, so
+  // the table carries only the scalar columns (no created_characters/issue_credits/
+  // story_arc_credits/volume_credits).
+  joinDatabase.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, birth TEXT, count_of_issue_appearances INTEGER, country TEXT, date_added TEXT, date_last_updated TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, image_url TEXT, site_detail_url TEXT)");
+  joinDatabase.exec("CREATE TABLE cv_person_credit (person_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (person_id, credit_type, position))");
+  joinDatabase.prepare("INSERT INTO cv_person (id, name, site_detail_url) VALUES (?, ?, ?)")
+      .run(1251, "Barry Kitson", "https://example.test/barry-kitson/");
+  // created_character x1, issue_credit x1 (emitted as `issues`), volume_credit x1;
+  // story_arc_credit has no rows (the live API emits []).
+  joinDatabase.prepare("INSERT INTO cv_person_credit (person_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1251, "created_character", 0, 168273, "Alex Trent", "https://example.test/character/4005-168273/", "https://example.test/alex-trent");
+  joinDatabase.prepare("INSERT INTO cv_person_credit (person_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1251, "issue_credit", 0, 30, "Issue A", "https://example.test/issue/4000-30/", "https://example.test/issue-a");
+  joinDatabase.prepare("INSERT INTO cv_person_credit (person_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1251, "volume_credit", 0, 3451, "Legion of Super-Heroes", "https://example.test/volume/4050-3451/", "https://example.test/legion");
+  joinDatabase.close();
+
+  const joinServer = createApiServer(joinDatabasePath, () => {});
+  await new Promise((resolve) => joinServer.listen(0, "127.0.0.1", resolve));
+  const joinUrl = `http://127.0.0.1:${joinServer.address().port}`;
+
+  try {
+    const detail = await (await fetch(`${joinUrl}/api/person/4040-1251/`)).json();
+    const result = detail.results;
+
+    // SRV-6d: the collections are generated from the join table, id-first key order.
+    assert.deepEqual(result.created_characters, [
+      { id: 168273, name: "Alex Trent", api_detail_url: "https://example.test/character/4005-168273/", site_detail_url: "https://example.test/alex-trent" }
+    ]);
+    // The issue_credits collection is emitted under the live name `issues` (SRV-20).
+    assert.deepEqual(result.issues, [
+      { id: 30, name: "Issue A", api_detail_url: "https://example.test/issue/4000-30/", site_detail_url: "https://example.test/issue-a" }
+    ]);
+    assert.deepEqual(result.volume_credits, [
+      { id: 3451, name: "Legion of Super-Heroes", api_detail_url: "https://example.test/volume/4050-3451/", site_detail_url: "https://example.test/legion" }
+    ]);
+    // story_arc_credit has no join rows → [] (the live API never returns null).
+    assert.deepEqual(result.story_arc_credits, []);
+  } finally {
+    await new Promise((resolve) => joinServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("derives first_appeared_in_issue from the issue id (UPD-15)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-concept-fai-test-"));
   const faiDatabasePath = path.join(directory, "concept-fai.db");

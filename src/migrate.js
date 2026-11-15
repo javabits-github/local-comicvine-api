@@ -329,6 +329,32 @@ function ensureJoinTables(conn, log) {
     CREATE INDEX IF NOT EXISTS idx_team_credit_type
       ON cv_team_credit (credit_type, credit_id)
   `);
+  // SRV-6d: the four person relationship collections (created_characters,
+  // issue_credits, story_arc_credits, volume_credits) normalized into a single
+  // join table (the publisher pattern, SRV-6a — no count column, since the
+  // entries carry none). The live API never returns null for these (always an
+  // array — verified against the verbatim raw-API dump), so no presence bitmask
+  // is needed: a person with no join rows emits [] for each. The issue_credits
+  // collection is emitted under the live name `issues` (SRV-20). The 4,757
+  // persons with NULL collections (a Node-updater artifact that post-dates the
+  // January dump) emit [] after the migration — an accepted null→[] divergence
+  // from the pre-change absent-key output.
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_person_credit (
+      person_id INTEGER NOT NULL,
+      credit_type TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      credit_id INTEGER,
+      name TEXT,
+      api_detail_url TEXT,
+      site_detail_url TEXT,
+      PRIMARY KEY (person_id, credit_type, position)
+    )
+  `);
+  conn.exec(`
+    CREATE INDEX IF NOT EXISTS idx_person_credit_type
+      ON cv_person_credit (credit_type, credit_id)
+  `);
 }
 
 // SRV-5: FTS5 full-text search indexes (final schema, not a migration). The
@@ -946,6 +972,100 @@ const MIGRATIONS = [
       } catch (e) {
         try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
         log(`  Warning: could not normalize teams: ${e.message}`, { force: true });
+        return false;
+      }
+    }
+  },
+
+  // v9: SRV-6d — the four person relationship collections (created_characters,
+  // issue_credits, story_arc_credits, volume_credits) are stored as JSON text on
+  // cv_person. This normalizes them into the cv_person_credit join table so the
+  // server can generate the collections directly (one row per entry, credit_type
+  // + position). The live API never returns null for these collections (always an
+  // array — verified against the verbatim raw-API dump), so no presence bitmask is
+  // needed (the concepts pattern, UPD-14): a person with no join rows emits [] for
+  // each. It backfills the join table from the JSON columns and then drops those
+  // columns. The collections are historical (the updater's field_list never requests
+  // them), so they are backfilled once and not refreshed by sync.
+  {
+    version: 9,
+    name: "SRV-6d person collection normalization",
+    up(conn, log) {
+      const personCols = tableColumns(conn, "cv_person");
+      const collectionCols = ["created_characters", "issue_credits", "story_arc_credits", "volume_credits"].filter((c) => personCols.includes(c));
+      // Nothing to migrate if the JSON columns are already gone (final schema) or
+      // the table is absent (a fresh database has no cv_person — it is
+      // Python-updater heritage, see DB-3).
+      if (collectionCols.length === 0) return true;
+
+      log("  Normalizing person collections into cv_person_credit...");
+      try {
+        const creditTypes = { created_characters: "created_character", issue_credits: "issue_credit", story_arc_credits: "story_arc_credit", volume_credits: "volume_credit" };
+        const insertCredit = conn.prepare(
+          `INSERT OR REPLACE INTO cv_person_credit
+             (person_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        const deleteCredits = conn.prepare(
+          "DELETE FROM cv_person_credit WHERE person_id = ? AND credit_type = ?"
+        );
+
+        // Process in id-ordered batches so memory stays bounded. The
+        // DELETE-then-INSERT per (person, type) makes the migration idempotent
+        // on re-run. One transaction per batch keeps the WAL bounded; a failure
+        // after a committed batch is safe because the migration is idempotent and
+        // the column drop runs only after every batch has committed.
+        const batchSize = 2000;
+        let minId = null;
+        let migrated = 0;
+        for (;;) {
+          const rows = conn.prepare(
+            `SELECT * FROM cv_person WHERE id > ? ORDER BY id LIMIT ?`
+          ).all(minId ?? 0, batchSize);
+          if (rows.length === 0) break;
+
+          conn.exec("BEGIN");
+          for (const row of rows) {
+            for (const [col, type] of Object.entries(creditTypes)) {
+              if (!personCols.includes(col)) continue;
+              const raw = row[col];
+              if (raw === null || raw === undefined) continue; // null: no rows
+              let entries;
+              try {
+                entries = JSON.parse(raw);
+              } catch {
+                continue;
+              }
+              if (!Array.isArray(entries)) continue;
+              deleteCredits.run(row.id, type);
+              entries.forEach((entry, position) => {
+                insertCredit.run(
+                  row.id, type, position,
+                  entry.id ?? null, entry.name ?? null,
+                  entry.api_detail_url ?? null, entry.site_detail_url ?? null
+                );
+              });
+            }
+            migrated++;
+          }
+          conn.exec("COMMIT");
+
+          minId = rows[rows.length - 1].id;
+          log(`  Migrated ${migrated} persons...`);
+          if (rows.length < batchSize) break;
+        }
+
+        // Drop the now-redundant JSON columns to complete the normalization.
+        conn.exec("BEGIN");
+        for (const col of collectionCols) {
+          conn.exec(`ALTER TABLE cv_person DROP COLUMN ${col}`);
+        }
+        conn.exec("COMMIT");
+        log(`  Normalized person collections for ${migrated} persons.`);
+        return true;
+      } catch (e) {
+        try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
+        log(`  Warning: could not normalize person collections: ${e.message}`, { force: true });
         return false;
       }
     }
