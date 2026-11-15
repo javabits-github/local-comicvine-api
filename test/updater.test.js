@@ -326,8 +326,17 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   const team = db.prepare("SELECT * FROM cv_team WHERE id=500").get();
   assert.equal(team.name, "Test Team");
   assert.equal(team.count_of_issue_appearances, 7);
-  const firstAppeared = JSON.parse(team.first_appeared_in_issue);
-  assert.equal(firstAppeared.id, 4001);
+  // SRV-6e: the two scalar refs are stored as inline id + display fields +
+  // key_order (the JSON columns are dropped by the v8 migration). The mock team
+  // provides publisher and first_appeared_in_issue, so the inline columns are
+  // populated; it provides no collections, so there are no join rows.
+  assert.ok(!("first_appeared_in_issue" in team), "first_appeared_in_issue column should be dropped");
+  assert.ok(!("character_enemies" in team), "character_enemies column should be dropped");
+  assert.equal(team.publisher_id, 100);
+  assert.equal(team.publisher_name, "Acme Comics");
+  assert.equal(team.first_appeared_in_issue_id, 4001);
+  assert.equal(team.first_appeared_in_issue_name, "Test Series #1");
+  assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_team_credit WHERE team_id=500").get().c, 0);
 
   // Story arc
   const arc = db.prepare("SELECT * FROM cv_storyarc WHERE id=600").get();

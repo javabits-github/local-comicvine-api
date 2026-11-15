@@ -1060,20 +1060,32 @@ class ComicVineUpdater {
 
         const countOfIssueAppearances =
           team.count_of_isssue_appearances || team.count_of_issue_appearances;
-        const firstAppeared = team.first_appeared_in_issue
-          ? JSON.stringify(team.first_appeared_in_issue)
-          : null;
+        // SRV-6e: the two scalar refs are stored as inline id + display fields +
+        // key_order (the JSON columns are dropped by the v8 migration). The
+        // key_order is the ref's exact key order so the server can re-emit the
+        // object byte-for-byte; api_detail_url is derived from the id on output
+        // (not stored). A null/absent ref stores NULLs.
+        const publisher = team.publisher;
+        const publisherId = publisher && publisher.id != null ? publisher.id : null;
+        const publisherName = publisher ? (publisher.name ?? null) : null;
+        const publisherKeyOrder = publisher ? JSON.stringify(Object.keys(publisher)) : null;
+        const firstAppeared = team.first_appeared_in_issue;
+        const faiId = firstAppeared && firstAppeared.id != null ? firstAppeared.id : null;
+        const faiName = firstAppeared ? (firstAppeared.name ?? null) : null;
+        const faiIssueNumber = firstAppeared ? (firstAppeared.issue_number ?? null) : null;
+        const faiKeyOrder = firstAppeared ? JSON.stringify(Object.keys(firstAppeared)) : null;
 
         this.conn.prepare(`
           INSERT INTO cv_team
-            (id, name, publisher, aliases, count_of_team_members,
+            (id, name, aliases, count_of_team_members,
              count_of_issue_appearances, deck, description,
              date_added, date_last_updated, image_url, site_detail_url,
-             first_appeared_in_issue)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             publisher_id, publisher_name, publisher_key_order,
+             first_appeared_in_issue_id, first_appeared_in_issue_name,
+             first_appeared_in_issue_issue_number, first_appeared_in_issue_key_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
-            publisher = excluded.publisher,
             aliases = excluded.aliases,
             count_of_team_members = excluded.count_of_team_members,
             count_of_issue_appearances = excluded.count_of_issue_appearances,
@@ -1083,15 +1095,23 @@ class ComicVineUpdater {
             date_last_updated = excluded.date_last_updated,
             image_url = excluded.image_url,
             site_detail_url = excluded.site_detail_url,
-            first_appeared_in_issue = COALESCE(excluded.first_appeared_in_issue, cv_team.first_appeared_in_issue)
+            publisher_id = excluded.publisher_id,
+            publisher_name = excluded.publisher_name,
+            publisher_key_order = excluded.publisher_key_order,
+            first_appeared_in_issue_id = COALESCE(excluded.first_appeared_in_issue_id, cv_team.first_appeared_in_issue_id),
+            first_appeared_in_issue_name = COALESCE(excluded.first_appeared_in_issue_name, cv_team.first_appeared_in_issue_name),
+            first_appeared_in_issue_issue_number = COALESCE(excluded.first_appeared_in_issue_issue_number, cv_team.first_appeared_in_issue_issue_number),
+            first_appeared_in_issue_key_order = COALESCE(excluded.first_appeared_in_issue_key_order, cv_team.first_appeared_in_issue_key_order)
         `).run(
-          teamId, jsonify(team.name), jsonify(team.publisher),
+          teamId, jsonify(team.name),
           jsonify(team.aliases),
           jsonify(team.count_of_team_members),
           jsonify(countOfIssueAppearances),
           jsonify(team.deck), jsonify(team.description),
           jsonify(team.date_added), jsonify(team.date_last_updated),
-          imageUrl, team.site_detail_url, firstAppeared
+          imageUrl, team.site_detail_url,
+          publisherId, publisherName, publisherKeyOrder,
+          faiId, faiName, faiIssueNumber, faiKeyOrder
         );
 
         if (exists) this.stats.teams_updated++;

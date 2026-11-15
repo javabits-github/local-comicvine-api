@@ -64,6 +64,26 @@ function inTransaction(conn, fn) {
   }
 }
 
+// SRV-6e: extract the scalar-ref display fields from a stored JSON ref object
+// (publisher / first_appeared_in_issue). Returns null for a null/absent/malformed
+// ref (or one without an id) so the caller stores NULLs. The key_order is the
+// ref's exact key order (a JSON array) so the server can re-emit the object
+// byte-for-byte; api_detail_url is in the key order but is derived from the id
+// on output (not stored). issue_number is captured only for first_appeared_in_issue.
+function extractScalarRef(raw, hasIssueNumber) {
+  if (raw === null || raw === undefined) return null;
+  let obj;
+  try { obj = JSON.parse(raw); } catch { return null; }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+  if (obj.id === null || obj.id === undefined) return null;
+  return {
+    id: obj.id,
+    name: obj.name ?? null,
+    issue_number: hasIssueNumber ? (obj.issue_number ?? null) : null,
+    key_order: JSON.stringify(Object.keys(obj))
+  };
+}
+
 // The eleven resource base tables, in the RESOURCES registry order (updater.js).
 // Kept in lockstep with that registry: when a resource is added there, add its
 // table here too (a new base table gets an FTS index on the next migrate).
@@ -128,15 +148,20 @@ function ensureMetadataTables(conn, log) {
 // upgrades for pre-existing databases are versioned migrations below).
 function ensureResourceTables(conn, log) {
   if (!conn) return;
+  // SRV-6e: the two scalar refs (publisher, first_appeared_in_issue) are stored
+  // as id + inline display fields + key_order (byte-for-byte safe — the updater
+  // refreshes them in lockstep with the team row, so a LEFT JOIN would diverge
+  // if the referenced row were re-synced after a rename). The nine relationship
+  // collections live in the cv_team_credit join table (ensureJoinTables).
   conn.exec(`
     CREATE TABLE IF NOT EXISTS cv_team (
-      id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT,
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT,
       count_of_team_members INTEGER, count_of_issue_appearances INTEGER,
       deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
-      image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT,
-      character_enemies TEXT, character_friends TEXT, characters TEXT,
-      disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT,
-      movies TEXT, story_arc_credits TEXT, volume_credits TEXT
+      image_url TEXT, site_detail_url TEXT,
+      publisher_id INTEGER, publisher_name TEXT, publisher_key_order TEXT,
+      first_appeared_in_issue_id INTEGER, first_appeared_in_issue_name TEXT,
+      first_appeared_in_issue_issue_number TEXT, first_appeared_in_issue_key_order TEXT
     )
   `);
   conn.exec(`
@@ -278,6 +303,31 @@ function ensureJoinTables(conn, log) {
   conn.exec(`
     CREATE INDEX IF NOT EXISTS idx_publisher_credit_type
       ON cv_publisher_credit (credit_type, credit_id)
+  `);
+  // SRV-6e: the eight team relationship collections (character_enemies,
+  // character_friends, characters, disbanded_in_issues, issue_credits, movies,
+  // story_arc_credits, volume_credits) normalized into a single join table (the
+  // publisher pattern, SRV-6a — no count column, since the entries carry none).
+  // The live API never returns null for these (always an array — verified against
+  // the verbatim raw-API dump: null=0 across all 11,835 teams), so no presence
+  // bitmask is needed: a team with no join rows emits [] for each. The disbanded
+  // collection is stored once (credit_type disbanded_in_issue) and emitted under
+  // both live names (disbanded_in_issues + isssues_disbanded_in).
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_team_credit (
+      team_id INTEGER NOT NULL,
+      credit_type TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      credit_id INTEGER,
+      name TEXT,
+      api_detail_url TEXT,
+      site_detail_url TEXT,
+      PRIMARY KEY (team_id, credit_type, position)
+    )
+  `);
+  conn.exec(`
+    CREATE INDEX IF NOT EXISTS idx_team_credit_type
+      ON cv_team_credit (credit_type, credit_id)
   `);
 }
 
@@ -735,6 +785,167 @@ const MIGRATIONS = [
       } catch (e) {
         try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
         log(`  Warning: could not normalize publisher collections: ${e.message}`, { force: true });
+        return false;
+      }
+    }
+  },
+
+  // v8: SRV-6e — the eleven team JSON columns are normalized. The nine
+  // relationship collections (character_enemies, character_friends, characters,
+  // disbanded_in_issues, issues_disbanded_in, issue_credits, movies,
+  // story_arc_credits, volume_credits) move into the cv_team_credit join table
+  // (the publisher pattern, SRV-6a). The live API never returns null for these
+  // (always an array — verified against the verbatim raw-API dump: null=0 across
+  // all 11,835 teams), so no presence bitmask is needed: a team with no join rows
+  // emits [] for each. The two scalar refs (publisher, first_appeared_in_issue)
+  // move to inline id + display-field + key_order columns (byte-for-byte safe —
+  // the updater refreshes them in lockstep with the team row, so a LEFT JOIN
+  // would diverge if the referenced row were re-synced after a rename).
+  //
+  // The disbanded collection is stored once (credit_type disbanded_in_issue, read
+  // from disbanded_in_issues) and emitted under both live names (disbanded_in_
+  // issues + isssues_disbanded_in); issues_disbanded_in (the corrected spelling,
+  // identical data) is dropped, not backfilled, to avoid duplicate join rows.
+  //
+  // The collections are historical (the updater's field_list never requests them),
+  // so they are backfilled once and not refreshed by sync. It backfills the join
+  // table and the inline columns from the JSON columns and then drops those
+  // columns. It is a no-op when the JSON columns are already gone (final schema).
+  {
+    version: 8,
+    name: "SRV-6e team normalization",
+    up(conn, log) {
+      const teamCols = tableColumns(conn, "cv_team");
+      const jsonCols = [
+        "publisher", "first_appeared_in_issue",
+        "character_enemies", "character_friends", "characters",
+        "disbanded_in_issues", "issues_disbanded_in", "issue_credits",
+        "movies", "story_arc_credits", "volume_credits"
+      ].filter((c) => teamCols.includes(c));
+      // Nothing to migrate if the JSON columns are already gone (final schema) or
+      // the table is absent (a fresh database has the final schema, no JSON cols).
+      if (jsonCols.length === 0) return true;
+
+      // The eight credit_types and their source columns. disbanded_in_issues is
+      // the sole source for the disbanded collection (issues_disbanded_in is the
+      // same data and is dropped, not backfilled, to avoid duplicate rows).
+      const creditTypes = {
+        character_enemies: "character_enemy",
+        character_friends: "character_friend",
+        characters: "character",
+        disbanded_in_issues: "disbanded_in_issue",
+        issue_credits: "issue_credit",
+        movies: "movie",
+        story_arc_credits: "story_arc_credit",
+        volume_credits: "volume_credit"
+      };
+      const creditTypeEntries = Object.entries(creditTypes).filter(([col]) => teamCols.includes(col));
+
+      // Add the seven inline scalar-ref columns (absent on pre-v8 databases; a
+      // fresh database has them from the CREATE but no JSON columns, so it
+      // returned above). The ALTERs are idempotent-guarded by the column check.
+      const inlineColumns = [
+        ["publisher_id", "INTEGER"],
+        ["publisher_name", "TEXT"],
+        ["publisher_key_order", "TEXT"],
+        ["first_appeared_in_issue_id", "INTEGER"],
+        ["first_appeared_in_issue_name", "TEXT"],
+        ["first_appeared_in_issue_issue_number", "TEXT"],
+        ["first_appeared_in_issue_key_order", "TEXT"]
+      ];
+      for (const [col, type] of inlineColumns) {
+        if (!teamCols.includes(col)) {
+          conn.exec(`ALTER TABLE cv_team ADD COLUMN ${col} ${type}`);
+        }
+      }
+
+      log("  Normalizing team collections into cv_team_credit...");
+      try {
+        const insertCredit = conn.prepare(
+          `INSERT OR REPLACE INTO cv_team_credit
+             (team_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        const deleteCredits = conn.prepare(
+          "DELETE FROM cv_team_credit WHERE team_id = ? AND credit_type = ?"
+        );
+        const updatePublisher = conn.prepare(
+          "UPDATE cv_team SET publisher_id = ?, publisher_name = ?, publisher_key_order = ? WHERE id = ?"
+        );
+        const updateFirstAppeared = conn.prepare(
+          "UPDATE cv_team SET first_appeared_in_issue_id = ?, first_appeared_in_issue_name = ?, " +
+          "first_appeared_in_issue_issue_number = ?, first_appeared_in_issue_key_order = ? WHERE id = ?"
+        );
+
+        // Process in id-ordered batches so memory stays bounded. The
+        // DELETE-then-INSERT per (team, type) makes the migration idempotent on
+        // re-run. One transaction per batch keeps the WAL bounded; a failure
+        // after a committed batch is safe because the migration is idempotent
+        // and the column drop runs only after every batch has committed.
+        const batchSize = 2000;
+        let minId = null;
+        let migrated = 0;
+        for (;;) {
+          const rows = conn.prepare(
+            `SELECT * FROM cv_team WHERE id > ? ORDER BY id LIMIT ?`
+          ).all(minId ?? 0, batchSize);
+          if (rows.length === 0) break;
+
+          conn.exec("BEGIN");
+          for (const row of rows) {
+            for (const [col, type] of creditTypeEntries) {
+              const raw = row[col];
+              if (raw === null || raw === undefined) continue; // null: no rows
+              let entries;
+              try {
+                entries = JSON.parse(raw);
+              } catch {
+                continue;
+              }
+              if (!Array.isArray(entries)) continue;
+              deleteCredits.run(row.id, type);
+              entries.forEach((entry, position) => {
+                insertCredit.run(
+                  row.id, type, position,
+                  entry.id ?? null, entry.name ?? null,
+                  entry.api_detail_url ?? null, entry.site_detail_url ?? null
+                );
+              });
+            }
+            if (teamCols.includes("publisher")) {
+              const ref = extractScalarRef(row.publisher, false);
+              updatePublisher.run(
+                ref ? ref.id : null, ref ? ref.name : null,
+                ref ? ref.key_order : null, row.id
+              );
+            }
+            if (teamCols.includes("first_appeared_in_issue")) {
+              const ref = extractScalarRef(row.first_appeared_in_issue, true);
+              updateFirstAppeared.run(
+                ref ? ref.id : null, ref ? ref.name : null,
+                ref ? ref.issue_number : null, ref ? ref.key_order : null, row.id
+              );
+            }
+            migrated++;
+          }
+          conn.exec("COMMIT");
+
+          minId = rows[rows.length - 1].id;
+          log(`  Migrated ${migrated} teams...`);
+          if (rows.length < batchSize) break;
+        }
+
+        // Drop the now-redundant JSON columns to complete the normalization.
+        conn.exec("BEGIN");
+        for (const col of jsonCols) {
+          conn.exec(`ALTER TABLE cv_team DROP COLUMN ${col}`);
+        }
+        conn.exec("COMMIT");
+        log(`  Normalized teams for ${migrated} teams.`);
+        return true;
+      } catch (e) {
+        try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
+        log(`  Warning: could not normalize teams: ${e.message}`, { force: true });
         return false;
       }
     }

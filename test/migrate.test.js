@@ -85,7 +85,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     const version = migrate(conn, makeLog());
     conn.close();
     assert.equal(version, SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 7);
+    assert.equal(SCHEMA_VERSION, 8);
 
     const db = new DatabaseSync(dbPath);
     const tables = tableNames(db);
@@ -98,7 +98,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // The join tables.
-    for (const t of ["cv_volume_credit", "cv_volume_issue_ref", "cv_concept_credit", "cv_publisher_credit"]) {
+    for (const t of ["cv_volume_credit", "cv_volume_issue_ref", "cv_concept_credit", "cv_publisher_credit", "cv_team_credit"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // FTS indexes for the seven created resource tables (the four legacy base
@@ -115,10 +115,19 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     assert.ok(conceptCols.includes("first_appeared_in_issue_id"));
     assert.ok(!conceptCols.includes("api_detail_url"));
     assert.ok(!conceptCols.includes("first_appeared_in_issue"));
+    // SRV-6e: cv_team is created on the final schema — the inline scalar-ref
+    // columns are present and the eleven JSON columns are absent.
+    const teamCols = columnNames(db, "cv_team");
+    for (const c of ["publisher_id", "publisher_name", "publisher_key_order", "first_appeared_in_issue_id", "first_appeared_in_issue_name", "first_appeared_in_issue_issue_number", "first_appeared_in_issue_key_order"]) {
+      assert.ok(teamCols.includes(c), `expected ${c}`);
+    }
+    for (const c of ["publisher", "first_appeared_in_issue", "character_enemies", "character_friends", "characters", "disbanded_in_issues", "issues_disbanded_in", "issue_credits", "movies", "story_arc_credits", "volume_credits"]) {
+      assert.ok(!teamCols.includes(c), `${c} should be absent`);
+    }
     // The seven newer endpoints are seeded at the raw-dump snapshot date.
     const endpoints = db.prepare("SELECT endpoint FROM cv_sync_metadata ORDER BY endpoint").all().map((r) => r.endpoint);
     assert.deepEqual(endpoints, ["characters", "concepts", "locations", "objects", "powers", "storyarcs", "teams"]);
-    assert.equal(readSchemaVersion(db), 7);
+    assert.equal(readSchemaVersion(db), 8);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -133,7 +142,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
     const conn = new DatabaseSync(dbPath);
     const version = migrate(conn, makeLog());
     conn.close();
-    assert.equal(version, 7);
+    assert.equal(version, 8);
 
     const db = new DatabaseSync(dbPath);
     // v1: resume_state added.
@@ -177,7 +186,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
       pubCredit.map((r) => [r.credit_type, r.credit_id, r.name]),
       [["character", 1, "A Character"], ["volume", 2, "A Volume"]]
     );
-    assert.equal(readSchemaVersion(db), 7);
+    assert.equal(readSchemaVersion(db), 8);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -194,7 +203,7 @@ test("migrate() is a no-op on an already-migrated database (stamp at final)", ()
     const log = makeLog();
     const version = migrate(conn, log); // second run: nothing to do
     conn.close();
-    assert.equal(version, 7);
+    assert.equal(version, 8);
     assert.ok(!log.lines.some((l) => l.includes("Applying migration")),
       `no migrations should run, got: ${log.lines.join(" | ")}`);
   } finally {
@@ -215,9 +224,9 @@ test("a partially-migrated database (stamp 2) runs only the newer migrations", (
     const log = makeLog();
     const version = migrate(conn, log);
     conn.close();
-    assert.equal(version, 7);
+    assert.equal(version, 8);
     const applied = log.lines.filter((l) => l.includes("Applying migration")).map((l) => l.match(/v(\d+)/)[1]);
-    assert.deepEqual(applied, ["3", "4", "5", "6", "7"]);
+    assert.deepEqual(applied, ["3", "4", "5", "6", "7", "8"]);
   } finally {
     cleanupTempDir(dir);
   }
@@ -230,9 +239,9 @@ test("the CLI migrates a database with --db and reports the version", () => {
   try {
     const result = spawnSync(process.execPath, [path.join(__dirname, "..", "src", "migrate.js"), "--db", dbPath], { encoding: "utf8" });
     assert.equal(result.status, 0, `stderr: ${result.stderr}`);
-    assert.ok(result.stdout.includes("Schema version: 7"), result.stdout);
+    assert.ok(result.stdout.includes("Schema version: 8"), result.stdout);
     const db = new DatabaseSync(dbPath);
-    assert.equal(readSchemaVersion(db), 7);
+    assert.equal(readSchemaVersion(db), 8);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -253,9 +262,9 @@ test("the CLI rejects a missing database", () => {
 // ─── Module shape ─────────────────────────────────────────────────────────────
 
 test("MIGRATIONS is an ordered, versioned list", () => {
-  assert.equal(MIGRATIONS.length, 7);
+  assert.equal(MIGRATIONS.length, 8);
   const versions = MIGRATIONS.map((m) => m.version);
-  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8]);
   for (const m of MIGRATIONS) {
     assert.equal(typeof m.up, "function");
     assert.equal(typeof m.name, "string");
@@ -357,6 +366,76 @@ test("v7 (SRV-6a) normalizes publisher collections into cv_publisher_credit and 
     // Idempotent: a re-run is a no-op (the columns are already dropped).
     v7.up(db, makeLog());
     assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_publisher_credit WHERE publisher_id = 1").get().c, 2);
+    db.close();
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
+// ─── v8 (SRV-6e) in isolation ─────────────────────────────────────────────────
+
+test("v8 (SRV-6e) normalizes team collections into cv_team_credit and the scalar refs into inline columns", () => {
+  const { dir, dbPath } = tempDb("srv6e.db");
+  try {
+    const conn = new DatabaseSync(dbPath);
+    conn.exec(`
+      CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, first_appeared_in_issue TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issues_disbanded_in TEXT, issue_credits TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT);
+      CREATE TABLE cv_team_credit (team_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (team_id, credit_type, position));
+    `);
+    const insert = conn.prepare("INSERT INTO cv_team (id, name, publisher, first_appeared_in_issue, character_enemies, character_friends, characters, disbanded_in_issues, issues_disbanded_in, issue_credits, movies, story_arc_credits, volume_credits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    // Row 1: a populated team (id-first key order, the January dump form). One
+    // character_enemy + one issue_credit + one disbanded_in_issue; the rest [].
+    insert.run(1, "Team 1",
+      JSON.stringify({ id: 31, name: "Marvel", api_detail_url: "https://comicvine.gamespot.com/api/publisher/4010-31/" }),
+      JSON.stringify({ id: 20965, name: "Elektra", issue_number: "168", api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_issue/4000-20965/" }),
+      JSON.stringify([{ id: 10, name: "Enemy A", api_detail_url: "https://comicvine.gamespot.com/api/character/4005-10/", site_detail_url: "https://comicvine.gamespot.com/enemy-a/" }]),
+      "[]", "[]",
+      JSON.stringify([{ id: 20, name: "Disband Issue", api_detail_url: "https://comicvine.gamespot.com/api/issue/4000-20/", site_detail_url: "https://comicvine.gamespot.com/disband/" }]),
+      JSON.stringify([{ id: 20, name: "Disband Issue", api_detail_url: "https://comicvine.gamespot.com/api/issue/4000-20/", site_detail_url: "https://comicvine.gamespot.com/disband/" }]),
+      JSON.stringify([{ id: 30, name: "Credit Issue", api_detail_url: "https://comicvine.gamespot.com/api/issue/4000-30/", site_detail_url: "https://comicvine.gamespot.com/credit/" }]),
+      "[]", "[]", "[]");
+    // Row 2: all collections NULL (a pre-SRV-6e artifact) + null scalar refs.
+    insert.run(2, "Team 2", null, null, null, null, null, null, null, null, null, null, null);
+    conn.close();
+
+    const db = new DatabaseSync(dbPath);
+    const v8 = MIGRATIONS.find((m) => m.version === 8);
+    v8.up(db, makeLog());
+
+    // The eleven JSON columns are dropped.
+    const cols = columnNames(db, "cv_team");
+    for (const c of ["publisher", "first_appeared_in_issue", "character_enemies", "character_friends", "characters", "disbanded_in_issues", "issues_disbanded_in", "issue_credits", "movies", "story_arc_credits", "volume_credits"]) {
+      assert.ok(!cols.includes(c), `${c} should be dropped`);
+    }
+    // The seven inline scalar-ref columns are added.
+    for (const c of ["publisher_id", "publisher_name", "publisher_key_order", "first_appeared_in_issue_id", "first_appeared_in_issue_name", "first_appeared_in_issue_issue_number", "first_appeared_in_issue_key_order"]) {
+      assert.ok(cols.includes(c), `${c} should be added`);
+    }
+    // Row 1: the scalar refs are backfilled (id + name + key_order).
+    const team1 = db.prepare("SELECT * FROM cv_team WHERE id = 1").get();
+    assert.equal(team1.publisher_id, 31);
+    assert.equal(team1.publisher_name, "Marvel");
+    assert.deepEqual(JSON.parse(team1.publisher_key_order), ["id", "name", "api_detail_url"]);
+    assert.equal(team1.first_appeared_in_issue_id, 20965);
+    assert.equal(team1.first_appeared_in_issue_name, "Elektra");
+    assert.equal(team1.first_appeared_in_issue_issue_number, "168");
+    assert.deepEqual(JSON.parse(team1.first_appeared_in_issue_key_order), ["id", "name", "issue_number", "api_detail_url"]);
+    // Row 1: one character_enemy + one disbanded_in_issue + one issue_credit
+    // (character_friends/characters/movies/story_arc/volume were []).
+    const rows1 = db.prepare("SELECT credit_type, credit_id, name FROM cv_team_credit WHERE team_id = 1 ORDER BY credit_type, position").all();
+    assert.equal(rows1.length, 3);
+    assert.deepEqual(rows1.map((r) => [r.credit_type, r.credit_id, r.name]),
+      [["character_enemy", 10, "Enemy A"], ["disbanded_in_issue", 20, "Disband Issue"], ["issue_credit", 30, "Credit Issue"]]);
+    // Row 2: no join rows (NULL collections) + null scalar refs.
+    const team2 = db.prepare("SELECT * FROM cv_team WHERE id = 2").get();
+    assert.equal(team2.publisher_id, null);
+    assert.equal(team2.publisher_name, null);
+    assert.equal(team2.first_appeared_in_issue_id, null);
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_team_credit WHERE team_id = 2").get().c, 0);
+
+    // Idempotent: a re-run is a no-op (the columns are already dropped).
+    v8.up(db, makeLog());
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_team_credit WHERE team_id = 1").get().c, 3);
     db.close();
   } finally {
     cleanupTempDir(dir);

@@ -823,6 +823,63 @@ test("builds publisher collections from the cv_publisher_credit join (SRV-6a)", 
   }
 });
 
+test("builds team collections from the cv_team_credit join and scalar refs from inline columns (SRV-6e)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-team-join-test-"));
+  const joinDatabasePath = path.join(directory, "team-join.db");
+  const joinDatabase = new DatabaseSync(joinDatabasePath);
+  // SRV-6e: the eleven JSON columns are dropped by the v8 migration, so the table
+  // carries the inline scalar-ref columns (no publisher/first_appeared_in_issue JSON).
+  joinDatabase.exec("CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, count_of_team_members INTEGER, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, publisher_id INTEGER, publisher_name TEXT, publisher_key_order TEXT, first_appeared_in_issue_id INTEGER, first_appeared_in_issue_name TEXT, first_appeared_in_issue_issue_number TEXT, first_appeared_in_issue_key_order TEXT)");
+  joinDatabase.exec("CREATE TABLE cv_team_credit (team_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (team_id, credit_type, position))");
+  joinDatabase.prepare("INSERT INTO cv_team (id, name, site_detail_url, publisher_id, publisher_name, publisher_key_order, first_appeared_in_issue_id, first_appeared_in_issue_name, first_appeared_in_issue_issue_number, first_appeared_in_issue_key_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(1800, "The Hand", "https://example.test/the-hand/", 31, "Marvel", JSON.stringify(["id", "name", "api_detail_url"]), 20965, "Elektra", "168", JSON.stringify(["id", "name", "issue_number", "api_detail_url"]));
+  // character_enemy x1, issue_credit x1, disbanded_in_issue x1; the rest have no
+  // rows (the live API emits []).
+  joinDatabase.prepare("INSERT INTO cv_team_credit (team_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1800, "character_enemy", 0, 10, "Enemy A", "https://example.test/character/4005-10/", "https://example.test/enemy-a");
+  joinDatabase.prepare("INSERT INTO cv_team_credit (team_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1800, "issue_credit", 0, 20, "Issue A", "https://example.test/issue/4000-20/", "https://example.test/issue-a");
+  joinDatabase.prepare("INSERT INTO cv_team_credit (team_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1800, "disbanded_in_issue", 0, 30, "Disband Issue", "https://example.test/issue/4000-30/", "https://example.test/disband");
+  joinDatabase.close();
+
+  const joinServer = createApiServer(joinDatabasePath, () => {});
+  await new Promise((resolve) => joinServer.listen(0, "127.0.0.1", resolve));
+  const joinUrl = `http://127.0.0.1:${joinServer.address().port}`;
+
+  try {
+    const detail = await (await fetch(`${joinUrl}/api/team/4060-1800/`)).json();
+    const result = detail.results;
+
+    // SRV-6e: the scalar refs are built from the inline columns, honoring the
+    // stored key order (id-first here) and deriving api_detail_url from the id.
+    assert.deepEqual(result.publisher, { id: 31, name: "Marvel", api_detail_url: "https://comicvine.gamespot.com/api/publisher/4010-31/" });
+    assert.deepEqual(result.first_appeared_in_issue, { id: 20965, name: "Elektra", issue_number: "168", api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_issue/4000-20965/" });
+    // The collections are generated from the join table, id-first key order.
+    assert.deepEqual(result.character_enemies, [
+      { id: 10, name: "Enemy A", api_detail_url: "https://example.test/character/4005-10/", site_detail_url: "https://example.test/enemy-a" }
+    ]);
+    assert.deepEqual(result.issue_credits, [
+      { id: 20, name: "Issue A", api_detail_url: "https://example.test/issue/4000-20/", site_detail_url: "https://example.test/issue-a" }
+    ]);
+    // The disbanded collection is emitted under both live names (the same data).
+    const disbanded = [
+      { id: 30, name: "Disband Issue", api_detail_url: "https://example.test/issue/4000-30/", site_detail_url: "https://example.test/disband" }
+    ];
+    assert.deepEqual(result.disbanded_in_issues, disbanded);
+    assert.deepEqual(result.isssues_disbanded_in, disbanded);
+    // The collections with no join rows emit [] (the live API never returns null).
+    assert.deepEqual(result.character_friends, []);
+    assert.deepEqual(result.characters, []);
+    assert.deepEqual(result.movies, []);
+    assert.deepEqual(result.story_arc_credits, []);
+    assert.deepEqual(result.volume_credits, []);
+  } finally {
+    await new Promise((resolve) => joinServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("derives first_appeared_in_issue from the issue id (UPD-15)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-concept-fai-test-"));
   const faiDatabasePath = path.join(directory, "concept-fai.db");

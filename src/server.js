@@ -396,6 +396,94 @@ function buildPublisherResult(row, database) {
   return result;
 }
 
+// SRV-6e: the eight team relationship collections, in the order the live API
+// emits them. credit_type in cv_team_credit maps to the field name. The
+// disbanded collection (credit_type disbanded_in_issue) is emitted under both
+// live names (disbanded_in_issues + isssues_disbanded_in) — see buildTeamResult.
+const TEAM_CREDIT_FIELDS = {
+  character_enemy: "character_enemies",
+  character_friend: "character_friends",
+  character: "characters",
+  disbanded_in_issue: "disbanded_in_issues",
+  issue_credit: "issue_credits",
+  movie: "movies",
+  story_arc_credit: "story_arc_credits",
+  volume_credit: "volume_credits"
+};
+
+// Rebuild a team credit entry with the exact key order the stored JSON used
+// (id, name, api_detail_url, site_detail_url) — id-first, like the publisher
+// credits (publisherCreditRowToObject).
+function teamCreditRowToObject(row) {
+  return {
+    id: row.credit_id,
+    name: row.name,
+    api_detail_url: row.api_detail_url,
+    site_detail_url: row.site_detail_url
+  };
+}
+
+// SRV-6e: rebuild a team scalar ref (publisher / first_appeared_in_issue) from
+// the inline id + display-field + key_order columns, honoring the stored key
+// order so the two historical variants (id-first vs api_detail_url-first)
+// serialize byte-for-byte. The display fields (name / issue_number) are stored
+// inline (byte-for-byte safe — the updater refreshes them in lockstep with the
+// team row, so a LEFT JOIN would diverge if the referenced row were re-synced
+// after a rename). api_detail_url is derived from the id (the ref's own
+// resource type: publisher/4010, first_appeared_in_issue/4000). A null id
+// emits null (the live API does).
+function buildTeamScalarRef(row, prefix) {
+  const id = row[`${prefix}_id`];
+  if (id === null || id === undefined) return null;
+  const values = {
+    id,
+    name: row[`${prefix}_name`] ?? null,
+    ...(prefix === "first_appeared_in_issue"
+      ? { issue_number: row[`${prefix}_issue_number`] ?? null }
+      : {}),
+    api_detail_url: buildApiDetailUrl(prefix, id)
+  };
+  let keys = Object.keys(values);
+  if (row[`${prefix}_key_order`]) {
+    try { keys = JSON.parse(row[`${prefix}_key_order`]); } catch { /* keep the default order */ }
+  }
+  const result = {};
+  for (const key of keys) {
+    if (key in values) result[key] = values[key];
+  }
+  return result;
+}
+
+// SRV-6e: generate the team collections from the cv_team_credit join table and
+// the two scalar refs from the inline columns (the v8 migration backfilled both
+// from the legacy JSON columns). The live API never returns null for the
+// collections (always an array), so a team with no join rows emits [] for each
+// (the concepts pattern, UPD-14). Used only when the join table exists;
+// buildResult's JSON-column path covers pre-SRV-6e databases and test fixtures
+// without it.
+function buildTeamResult(row, database) {
+  const result = buildResult(row, "team");
+
+  // The two scalar refs from the inline columns (byte-for-byte safe).
+  result.publisher = buildTeamScalarRef(row, "publisher");
+  result.first_appeared_in_issue = buildTeamScalarRef(row, "first_appeared_in_issue");
+
+  const creditRows = database
+    .prepare("SELECT * FROM cv_team_credit WHERE team_id = ? ORDER BY credit_type, position")
+    .all(row.id);
+  const creditsByType = {};
+  for (const credit of creditRows) {
+    (creditsByType[credit.credit_type] ??= []).push(credit);
+  }
+  for (const [type, field] of Object.entries(TEAM_CREDIT_FIELDS)) {
+    result[field] = (creditsByType[type] ?? []).map(teamCreditRowToObject);
+  }
+  // The disbanded collection is emitted under both live names (the same data).
+  result.isssues_disbanded_in = result.disbanded_in_issues;
+
+  return result;
+}
+
 function buildResult(row, singular) {
   const has = (name) => Object.hasOwn(row, name);
   if (singular === "volume") {
@@ -800,6 +888,17 @@ function buildResourceConfig(database, resource) {
   alias = singular === "team" ? "t" : "a";
   from = `${resource.table} ${alias}`;
   selectExtra = `${alias}.*`;
+  // SRV-6e: generate the team collections from the cv_team_credit join table and
+  // the two scalar refs from the inline columns once the v8 migration has dropped
+  // the legacy JSON columns. The character_enemies column is the completion
+  // marker — it is dropped in the same transaction as the other ten, so its
+  // absence means the migration completed (a rolled-back migration keeps it).
+  // Otherwise buildResult reads the legacy JSON columns (pre-SRV-6e databases and
+  // test fixtures without the join table). The live API is never null for the
+  // collections, so a team with no join rows emits [] for each.
+  if (singular === "team" && !has("character_enemies") && tableColumns(database, "cv_team_credit").size > 0) {
+    build = (row) => buildTeamResult(row, database);
+  }
   } else if (singular === "issue") {
   alias = "i";
   from = `${resource.table} i` + (volumeColumns.size > 0 ? " LEFT JOIN cv_volume v ON v.id = i.volume_id" : "");
