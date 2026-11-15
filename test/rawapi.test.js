@@ -8,7 +8,6 @@ const { DatabaseSync } = require("node:sqlite");
 const {
   RawApiSync,
   RESOURCES,
-  SNAPSHOT_DATE,
   confirmFullSync,
   findLatestRawApiDatabase,
   resolveResource,
@@ -290,19 +289,45 @@ test("incremental sync includes a date filter; full sync omits it", async () => 
   }
 });
 
+test("syncResource with a null start date runs a full sync (no date filter)", async () => {
+  const publisher = RESOURCES.find((r) => r.name === "publisher");
+  const urls = [];
+  const fetchFn = async (url) => {
+    urls.push(url);
+    return { status: 200, ok: true, json: async () => ({ status_code: 1, results: [], number_of_total_results: 0 }) };
+  };
+  const { dir, dbPath } = makeEmptyDb();
+  try {
+    const sync = new RawApiSync(dbPath, "test-key", { verbose: false, full: false, fetchFn, apiDelayMs: 0 });
+    assert.ok(sync.connect());
+    sync.ensureTables();
+    await sync.syncResource(publisher, null, "2026-01-02");
+    sync.close();
+    assert.equal(new URL(urls[0]).searchParams.get("filter"), null, "an auto full sync must not include a date filter");
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
 // ─── Metadata start-date seeding ─────────────────────────────────────────────
 
-test("calculateSafeStartDate seeds new endpoints at SNAPSHOT_DATE and overlaps existing by 1 day", () => {
+test("calculateSafeStartDate tiers: lastSync-1, newest-stored-1, null for empty, null for interrupted full", () => {
   const { dir, dbPath } = makeEmptyDb();
   try {
     const sync = new RawApiSync(dbPath, "test-key", { verbose: false });
     assert.ok(sync.connect());
     sync.ensureTables();
-    // No recorded sync yet → the snapshot date.
-    assert.equal(sync.calculateSafeStartDate("publisher"), SNAPSHOT_DATE);
+    // No recorded sync + empty table → null (the caller runs a full sync).
+    assert.equal(sync.calculateSafeStartDate("publisher"), null);
+    // No recorded sync + stored rows → newest date_last_updated minus one day.
+    sync.conn.prepare("INSERT INTO cv_publisher (id, date_last_updated) VALUES (?, ?)").run(5, "2026-05-10 12:00:00");
+    assert.equal(sync.calculateSafeStartDate("publisher"), "2026-05-09");
     // After a sync → lastSync minus one day (same-day overlap).
     sync.setEndpointLastSync("publisher", "2026-03-01");
     assert.equal(sync.calculateSafeStartDate("publisher"), "2026-02-28");
+    // An interrupted full sync (seeded last_sync_date + full resume state) → full again.
+    sync.conn.prepare("UPDATE cv_sync_metadata SET resume_state = ? WHERE endpoint = 'publisher'").run(JSON.stringify({ processed_ids: [5], full: true }));
+    assert.equal(sync.calculateSafeStartDate("publisher"), null);
     sync.close();
   } finally {
     cleanupTempDir(dir);

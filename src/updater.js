@@ -397,12 +397,64 @@ class ComicVineUpdater {
     } catch { /* ignore */ }
   }
 
+  // The newest date_last_updated stored in a resource table, as a YYYY-MM-DD
+  // date (null when the table is absent, empty, or lacks the column).
+  getNewestStoredDate(table) {
+    if (!this.conn) return null;
+    try {
+      const row = this.conn.prepare(
+        `SELECT MAX(date_last_updated) AS newest FROM ${table}`
+      ).get();
+      return row && row.newest ? String(row.newest).slice(0, 10) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Whether a table exists in the database (the skip-if-absent tier below).
+  tableExists(table) {
+    if (!this.conn) return false;
+    try {
+      return this.conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+      ).get(table) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  // UPD-18: the date window to sync, tiered so no tier can silently miss rows:
+  //   1. A valid last_sync_date → one day before it (the same-day overlap that
+  //      keeps an update committed on the last sync day from being missed).
+  //      Exception: a pending resume state marked `full` means the previous
+  //      run was an interrupted full sync whose stored last_sync_date is a
+  //      seed (today), not a window start — re-run the full sync (null)
+  //      instead of a one-day window that would miss the rest.
+  //   2. No usable last_sync_date (never synced, or the row was lost or
+  //      corrupted) → the newest stored date_last_updated, minus one day.
+  //      An arbitrary window (the old 30-day fallback) would silently miss
+  //      every entity updated before it; the data itself is the only honest
+  //      baseline — a completed sync means everything newer than the newest
+  //      stored row is exactly what is missing.
+  //   3. No usable last_sync_date and the table is empty (or absent) → null:
+  //      no window can populate an empty table, so the caller runs a full
+  //      sync (no date filter) — or skips the endpoint if the table does not
+  //      exist at all (nothing to store into).
   calculateSafeStartDate(endpoint) {
     const lastSync = this.getEndpointLastSync(endpoint);
-    if (lastSync) {
-      if (isValidDate(lastSync)) return dateAddDays(lastSync, -1);
+    if (lastSync && isValidDate(lastSync)) {
+      const resume = this.getResumeState(endpoint);
+      if (resume && resume.full) return null;
+      return dateAddDays(lastSync, -1);
     }
-    return dateAddDays(todayStr(), -30);
+    const resource = RESOURCES.find((r) => r.name === endpoint);
+    if (!resource) return dateAddDays(todayStr(), -30); // unknown endpoint: keep the old guess
+    const newest = this.getNewestStoredDate(resource.table);
+    if (newest) {
+      this.log(`  ${resource.label}: no last_sync_date recorded — baselining on the newest stored row (${newest})`);
+      return dateAddDays(newest, -1);
+    }
+    return null; // empty or absent table → full sync (or skip, see runSync)
   }
 
   // ─── API Call ───────────────────────────────────────────────────────────
@@ -845,12 +897,18 @@ class ComicVineUpdater {
       this.log(`  Resuming from previous run. Skipping ${processedIds.size} already processed issues.`);
     }
 
-    // Ensure metadata row exists
-    this.conn.prepare(
-      `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
-       VALUES (?, ?, ?)
-       ON CONFLICT(endpoint) DO NOTHING`
-    ).run("issues", startDate, new Date().toISOString());
+    // Ensure metadata row exists (so resume-state updates have a row to
+    // update, and a crashed windowed run leaves the window start for
+    // re-coverage). A full sync has no window start to store (last_sync_date
+    // is NOT NULL); its row is created on the first resume-state save instead
+    // (or by setEndpointLastSync on completion).
+    if (startDate) {
+      this.conn.prepare(
+        `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
+         VALUES (?, ?, ?)
+         ON CONFLICT(endpoint) DO NOTHING`
+      ).run("issues", startDate, new Date().toISOString());
+    }
 
     // Get list of updated issue IDs
     const issueIds = [];
@@ -933,9 +991,11 @@ class ComicVineUpdater {
 
       processedIds.add(issueId);
 
-      // Commit periodically and save state
+      // Commit periodically and save state. `full` marks an interrupted full
+      // sync so the next run re-runs the full sync (calculateSafeStartDate)
+      // instead of mistaking the seeded last_sync_date for a real window.
       if ((i + 1) % 50 === 0) {
-        this.saveResumeState("issues", { processed_ids: [...processedIds] });
+        this.saveResumeState("issues", { processed_ids: [...processedIds], full });
         this.log(`    --- SAVED RESUME STATE (${i + 1}/${remaining.length}) ---`);
       }
     }
@@ -1482,12 +1542,15 @@ class ComicVineUpdater {
       this.log(`  Resuming from previous run. Skipping ${processedIds.size} already processed concepts.`);
     }
 
-    // Ensure metadata row exists
-    this.conn.prepare(
-      `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
-       VALUES (?, ?, ?)
-       ON CONFLICT(endpoint) DO NOTHING`
-    ).run("concepts", startDate, new Date().toISOString());
+    // Ensure metadata row exists (see syncIssues: a full sync has no window
+    // start to store, so the row is created on the first resume-state save).
+    if (startDate) {
+      this.conn.prepare(
+        `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
+         VALUES (?, ?, ?)
+         ON CONFLICT(endpoint) DO NOTHING`
+      ).run("concepts", startDate, new Date().toISOString());
+    }
 
     // UPD-14 phase 1: collect the changed ids. The live concepts/ list endpoint
     // silently drops the relationship collections (verified 2026-11-12: a list
@@ -1552,9 +1615,11 @@ class ComicVineUpdater {
 
       processedIds.add(conceptId);
 
-      // Commit periodically and save state
+      // Commit periodically and save state. `full` marks an interrupted full
+      // sync so the next run re-runs the full sync (calculateSafeStartDate)
+      // instead of mistaking the seeded last_sync_date for a real window.
       if ((i + 1) % 50 === 0) {
-        this.saveResumeState("concepts", { processed_ids: [...processedIds] });
+        this.saveResumeState("concepts", { processed_ids: [...processedIds], full });
         this.log(`    --- SAVED RESUME STATE (${i + 1}/${remaining.length}) ---`);
       }
     }
@@ -1687,9 +1752,28 @@ class ComicVineUpdater {
       const start = startDate || this.calculateSafeStartDate(ep.name);
       const last = this.getEndpointLastSync(ep.name);
       if (last) this.log(`${ep.label} last synced: ${last}`);
-      this.log(`Syncing ${ep.label} from ${start} to ${endDate}${this.full ? " (FULL)" : ""}`);
+      // UPD-18: a null start means "no window can help" — run a full sync
+      // (no date filter) for this endpoint, or skip it if its table does not
+      // exist at all (a fresh database: the four legacy tables are
+      // Python-updater heritage and are not created by migrate.js, so a full
+      // sync would only burn API calls into "no such table" failures).
+      const full = this.full || start === null;
+      if (start === null && !this.tableExists(ep.table)) {
+        this.log(
+          `ERROR: ${ep.label}: ${ep.table} does not exist in this database — skipping (nothing to sync into).`,
+          { force: true }
+        );
+        continue;
+      }
+      if (start === null) {
+        this.log(
+          `${ep.label}: no sync history and no stored rows — running a FULL sync (no date filter)`,
+          { force: true }
+        );
+      }
+      this.log(`Syncing ${ep.label} from ${start ?? "(full)"} to ${endDate}${full ? " (FULL)" : ""}`);
       try {
-        await this[ep.method](start, endDate, this.full);
+        await this[ep.method](start, endDate, full);
       } catch (e) {
         this.log(`ERROR: ${e.message}. Skipping metadata update for ${ep.name}.`, { force: true });
       }

@@ -310,12 +310,51 @@ class RawApiSync {
     } catch { /* ignore */ }
   }
 
-  // No recorded sync yet → start at the snapshot date. Otherwise overlap by
-  // one day (mirrors the updater) so a same-day update is not missed.
+  // The newest date_last_updated stored in a resource table, as a YYYY-MM-DD
+  // date (null when the table is empty or lacks the column).
+  getNewestStoredDate(table) {
+    if (!this.conn) return null;
+    try {
+      const row = this.conn.prepare(
+        `SELECT MAX(date_last_updated) AS newest FROM ${table}`
+      ).get();
+      return row && row.newest ? String(row.newest).slice(0, 10) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // UPD-18: the date window to sync, tiered so no tier can silently miss rows:
+  //   1. A valid last_sync_date → one day before it (the same-day overlap that
+  //      keeps an update committed on the last sync day from being missed).
+  //      Exception: a pending resume state marked `full` means the previous
+  //      run was an interrupted full sync whose stored last_sync_date is a
+  //      seed (today), not a window start — re-run the full sync (null)
+  //      instead of a one-day window that would miss the rest.
+  //   2. No usable last_sync_date → the newest stored date_last_updated, minus
+  //      one day. The old snapshot-date fallback assumed the database was
+  //      built from the 2026-01-22 snapshot; a database built from a newer
+  //      snapshot (or an empty one) would miss every entity updated before
+  //      the snapshot date. The data itself is the only honest baseline.
+  //   3. No usable last_sync_date and the table is empty → null: no window
+  //      can populate an empty table, so the caller runs a full sync (no
+  //      date filter). (All eleven tables always exist here — ensureTables
+  //      creates them — so there is no skip-if-absent tier as in the updater.)
   calculateSafeStartDate(endpoint) {
     const lastSync = this.getEndpointLastSync(endpoint);
-    if (lastSync && isValidDate(lastSync)) return dateAddDays(lastSync, -1);
-    return SNAPSHOT_DATE;
+    if (lastSync && isValidDate(lastSync)) {
+      const resume = this.getResumeState(endpoint);
+      if (resume && resume.full) return null;
+      return dateAddDays(lastSync, -1);
+    }
+    const resource = RESOURCES.find((r) => r.name === endpoint);
+    if (!resource) return SNAPSHOT_DATE; // unknown resource: keep the old guess
+    const newest = this.getNewestStoredDate(resource.table);
+    if (newest) {
+      this.log(`  ${resource.name}: no last_sync_date recorded — baselining on the newest stored row (${newest})`);
+      return dateAddDays(newest, -1);
+    }
+    return null; // empty table → full sync
   }
 
   // ─── API Call ─────────────────────────────────────────────────────────────
@@ -434,7 +473,10 @@ class RawApiSync {
   }
 
   async syncResource(resource, startDate, endDate) {
-    this.log(`\n--- Syncing ${resource.name} ---${this.full ? " (FULL)" : ""}`);
+    // UPD-18: a null startDate means the caller auto-detected a full sync
+    // (no sync history and no stored rows) — treat it like --full.
+    const full = this.full || startDate === null;
+    this.log(`\n--- Syncing ${resource.name} ---${full ? " (FULL)" : ""}`);
     if (!this.conn) return;
 
     // Resume state from a previous (interrupted) run.
@@ -445,30 +487,37 @@ class RawApiSync {
       this.log(`  Resuming from previous run. Skipping ${processedIds.size} already processed ${resource.name}.`);
     }
 
-    // Ensure a metadata row exists for this endpoint.
-    this.conn.prepare(
-      `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
-       VALUES (?, ?, ?)
-       ON CONFLICT(endpoint) DO NOTHING`
-    ).run(resource.name, startDate, new Date().toISOString());
+    // Ensure a metadata row exists for this endpoint (so resume-state updates
+    // have a row to update, and a crashed windowed run leaves the window start
+    // for re-coverage). A full sync has no window start to store
+    // (last_sync_date is NOT NULL); its row is created on the first
+    // resume-state save instead (or by setEndpointLastSync on completion).
+    if (startDate) {
+      this.conn.prepare(
+        `INSERT INTO cv_sync_metadata (endpoint, last_sync_date, last_sync_timestamp)
+         VALUES (?, ?, ?)
+         ON CONFLICT(endpoint) DO NOTHING`
+      ).run(resource.name, startDate, new Date().toISOString());
+    }
 
     // Phase 1: discover changed ids via the (cheap) list endpoint.
     const ids = [];
     let offset = 0;
     const limit = 100;
 
-    this.log(`  Finding changed ${resource.name}...${this.full ? " (full sync)" : ""}`);
+    this.log(`  Finding changed ${resource.name}...${full ? " (full sync)" : ""}`);
     while (true) {
       const params = { field_list: "id", offset, limit };
-      if (!this.full) params.filter = `date_last_updated:${startDate}|${endDate}`;
+      if (!full) params.filter = `date_last_updated:${startDate}|${endDate}`;
       params.sort = "date_last_updated:asc";
 
       const data = await this.apiCall(resource.list, params);
       if (!data) {
         // A list call that still fails after all retries (e.g. a persistent
         // 401 rate-limit artifact) skips this table; the sync continues with
-        // the remaining resources. last_sync_date stays at `startDate`, so
-        // the next run re-covers this window.
+        // the remaining resources. last_sync_date stays at `startDate` (or
+        // unset for a full sync), so the next run re-covers this window (or
+        // re-runs the full sync).
         this.log(
           `  WARNING: could not list ${resource.name} after ${MAX_RETRIES} attempts — skipping this table.`,
           { force: true }
@@ -522,9 +571,12 @@ class RawApiSync {
 
       processedIds.add(id);
 
-      // Commit periodically and save resume state.
+      // Commit periodically and save resume state. `full` marks an
+      // interrupted full sync so the next run re-runs the full sync
+      // (calculateSafeStartDate) instead of mistaking the seeded
+      // last_sync_date for a real window.
       if ((i + 1) % 50 === 0) {
-        this.saveResumeState(resource.name, { processed_ids: [...processedIds] });
+        this.saveResumeState(resource.name, { processed_ids: [...processedIds], full });
         this.log(`    --- SAVED RESUME STATE (${i + 1}/${remaining.length}) ---`);
       }
     }
@@ -553,7 +605,16 @@ class RawApiSync {
       const start = startDate || this.calculateSafeStartDate(resource.name);
       const last = this.getEndpointLastSync(resource.name);
       if (last) this.log(`${resource.name} last synced: ${last}`);
-      this.log(`Syncing ${resource.name} from ${start} to ${endDate}${this.full ? " (FULL)" : ""}`);
+      // UPD-18: a null start means no sync history and no stored rows — a
+      // full sync (no date filter) is the only way to populate the table.
+      const full = this.full || start === null;
+      if (start === null) {
+        this.log(
+          `${resource.name}: no sync history and no stored rows — running a FULL sync (no date filter)`,
+          { force: true }
+        );
+      }
+      this.log(`Syncing ${resource.name} from ${start ?? "(full)"} to ${endDate}${full ? " (FULL)" : ""}`);
       try {
         await this.syncResource(resource, start, endDate);
       } catch (e) {

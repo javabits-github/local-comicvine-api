@@ -714,6 +714,86 @@ test("post-sync maintenance is scoped to the selected resources", async () => {
   }
 });
 
+// ─── runSync: sync-window fallback (UPD-18) ─────────────────────────────────
+
+test("calculateSafeStartDate tiers: lastSync-1, newest-stored-1, null for empty, null for interrupted full", () => {
+  const { dir, dbPath } = makeFullDb();
+  try {
+    const updater = new ComicVineUpdater(dbPath, "test-key", { verbose: false });
+    assert.ok(updater.connect());
+    // No recorded sync + empty table → null (the caller runs a full sync).
+    assert.equal(updater.calculateSafeStartDate("publishers"), null);
+    // No recorded sync + stored rows → newest date_last_updated minus one day.
+    updater.conn.prepare("INSERT INTO cv_publisher (id, date_last_updated) VALUES (?, ?)").run(100, "2026-05-10 12:00:00");
+    assert.equal(updater.calculateSafeStartDate("publishers"), "2026-05-09");
+    // After a sync → lastSync minus one day (same-day overlap).
+    updater.setEndpointLastSync("publishers", "2026-03-01");
+    assert.equal(updater.calculateSafeStartDate("publishers"), "2026-02-28");
+    // An interrupted full sync (seeded last_sync_date + full resume state) → full again.
+    updater.conn.prepare("UPDATE cv_sync_metadata SET resume_state = ? WHERE endpoint = 'publishers'").run(JSON.stringify({ processed_ids: [100], full: true }));
+    assert.equal(updater.calculateSafeStartDate("publishers"), null);
+    updater.close();
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
+test("runSync runs a full sync (no date filter) for an endpoint with no history and an empty table", async () => {
+  const { dir, dbPath } = makeFullDb();
+  try {
+    const { fn, calls } = makeMockFetch();
+    const lines = [];
+    const updater = new ComicVineUpdater(dbPath, "test-key", {
+      verbose: false, full: false, fetchFn: fn, apiDelayMs: 0,
+      resources: [resolveResource("publishers")],
+      logCapture: { write: (m) => lines.push(m) }
+    });
+    assert.ok(updater.connect());
+    await updater.runSync();
+    updater.close();
+
+    const listCalls = calls.filter((u) => new URL(u).pathname.includes("/publishers/"));
+    assert.ok(listCalls.length > 0, "the publishers list was called");
+    for (const u of listCalls) {
+      assert.equal(new URL(u).searchParams.get("filter"), null, "an auto full sync must not include a date filter");
+    }
+    assert.ok(lines.some((l) => l.includes("running a FULL sync")), "the auto full sync was announced");
+    // The publisher was stored and the metadata stamped.
+    const db = new DatabaseSync(dbPath);
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_publisher").get().c, 1);
+    assert.ok(db.prepare("SELECT last_sync_date FROM cv_sync_metadata WHERE endpoint = 'publishers'").get().last_sync_date);
+    db.close();
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
+test("runSync skips an endpoint whose table is absent (a fresh database)", async () => {
+  // A bare DB file: migrate() creates the six newer tables + metadata, but
+  // the four legacy tables (cv_publisher, …) are Python-updater heritage and
+  // are never created — so publishers must be skipped, not full-synced into
+  // a void (which would burn API calls into "no such table" failures).
+  const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-absent-"));
+  const dbPath = path.join(dir, "absent.db");
+  new DatabaseSync(dbPath).close();
+  try {
+    const { fn, calls } = makeMockFetch();
+    const lines = [];
+    const updater = new ComicVineUpdater(dbPath, "test-key", {
+      verbose: false, full: false, fetchFn: fn, apiDelayMs: 0,
+      resources: [resolveResource("publishers")],
+      logCapture: { write: (m) => lines.push(m) }
+    });
+    assert.ok(updater.connect());
+    await updater.runSync();
+    updater.close();
+    assert.equal(calls.filter((u) => new URL(u).pathname.includes("/publishers/")).length, 0, "no publishers API calls");
+    assert.ok(lines.some((l) => l.includes("does not exist in this database — skipping")), "the skip was announced");
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
 // ─── confirmFullSync: resource scaling ──────────────────────────────────────
 
 test("confirmFullSync accepts a resource subset and keeps the yes/no contract", async () => {
