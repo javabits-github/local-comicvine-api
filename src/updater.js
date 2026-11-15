@@ -149,6 +149,17 @@ function jsonify(value) {
   return value;
 }
 
+// UPD-8: store a relationship collection as JSON text, but an explicit `null`
+// as SQL NULL (not `"[]"`) so the server can distinguish a null collection from
+// an empty one. The live API returns `null` for the six `first_appearance_*`
+// collections and `[]` for the other ten; the old `JSON.stringify(x || [])`
+// coercion stored `"[]"` for both, so the server answered `[]` where the live
+// API answers `null`. A key that is absent (`undefined`) is still stored as
+// `"[]"` (the pre-UPD-8 behavior) — the live API always emits all sixteen.
+function jsonifyCollection(value) {
+  return value === null ? null : JSON.stringify(value ?? []);
+}
+
 // ─── Log Capture ─────────────────────────────────────────────────────────────
 
 class LogCapture {
@@ -855,27 +866,30 @@ class ComicVineUpdater {
       jsonify(issueData.description),
       issueData.image ? issueData.image.original_url : null,
       issueData.site_detail_url,
-      JSON.stringify(issueData.character_credits || []),
-      JSON.stringify(issueData.person_credits || []),
-      JSON.stringify(issueData.team_credits || []),
-      JSON.stringify(issueData.location_credits || []),
-      JSON.stringify(issueData.story_arc_credits || []),
-      JSON.stringify(issueData.associated_images || []),
+      // UPD-8: collections are stored via jsonifyCollection so an API `null`
+      // becomes SQL NULL (not `"[]"`); the six first_appearance_* are always
+      // null on the live API, the other ten always `[]` or populated.
+      jsonifyCollection(issueData.character_credits),
+      jsonifyCollection(issueData.person_credits),
+      jsonifyCollection(issueData.team_credits),
+      jsonifyCollection(issueData.location_credits),
+      jsonifyCollection(issueData.story_arc_credits),
+      jsonifyCollection(issueData.associated_images),
       // UPD-11: api_detail_url is derived from the id by the server, so it is
       // no longer stored.
       jsonify(issueData.aliases),
       jsonify(issueData.deck), jsonify(issueData.date_added),
       jsonify(issueData.date_last_updated),
-      JSON.stringify(issueData.object_credits || []),
-      JSON.stringify(issueData.concept_credits || []),
-      JSON.stringify(issueData.character_died_in || []),
-      JSON.stringify(issueData.team_disbanded_in || []),
-      JSON.stringify(issueData.first_appearance_characters || []),
-      JSON.stringify(issueData.first_appearance_concepts || []),
-      JSON.stringify(issueData.first_appearance_locations || []),
-      JSON.stringify(issueData.first_appearance_objects || []),
-      JSON.stringify(issueData.first_appearance_storyarcs || []),
-      JSON.stringify(issueData.first_appearance_teams || []),
+      jsonifyCollection(issueData.object_credits),
+      jsonifyCollection(issueData.concept_credits),
+      jsonifyCollection(issueData.character_died_in),
+      jsonifyCollection(issueData.team_disbanded_in),
+      jsonifyCollection(issueData.first_appearance_characters),
+      jsonifyCollection(issueData.first_appearance_concepts),
+      jsonifyCollection(issueData.first_appearance_locations),
+      jsonifyCollection(issueData.first_appearance_objects),
+      jsonifyCollection(issueData.first_appearance_storyarcs),
+      jsonifyCollection(issueData.first_appearance_teams),
       jsonify(issueData.has_staff_review)
     ];
     try {

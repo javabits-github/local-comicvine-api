@@ -118,10 +118,13 @@ function makeMockFetch() {
         deck: "A deck", date_added: "2020-01-01 00:00:00",
         date_last_updated: "2026-01-01 00:00:00",
         object_credits: [], concept_credits: [], character_died_in: [],
-        team_disbanded_in: [], first_appearance_characters: [],
-        first_appearance_concepts: [], first_appearance_locations: [],
-        first_appearance_objects: [], first_appearance_storyarcs: [],
-        first_appearance_teams: [], has_staff_review: false
+        team_disbanded_in: [],
+        // UPD-8: the live API returns null (not []) for the six
+        // first_appearance_* collections; the updater must store SQL NULL.
+        first_appearance_characters: null,
+        first_appearance_concepts: null, first_appearance_locations: null,
+        first_appearance_objects: null, first_appearance_storyarcs: null,
+        first_appearance_teams: null, has_staff_review: false
       };
       return { status: 200, ok: true, json: async () => ({ status_code: 1, results: issue }) };
     } else if (ep.includes("/teams/")) {
@@ -307,6 +310,13 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.equal(issues[0].has_staff_review, 0);
   const credits = JSON.parse(issues[0].character_credits);
   assert.equal(credits[0].name, "Hero");
+  // UPD-8: the six first_appearance_* collections are null on the live API and
+  // must be stored as SQL NULL (not "[]"), so the server emits null, not [].
+  for (const c of ["first_appearance_characters", "first_appearance_concepts", "first_appearance_locations", "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"]) {
+    assert.equal(issues[0][c], null, `${c} should be stored as SQL NULL`);
+  }
+  // The never-null collections keep their "[]" / populated values.
+  assert.equal(issues[0].team_disbanded_in, "[]");
 
   // Team
   const team = db.prepare("SELECT * FROM cv_team WHERE id=500").get();

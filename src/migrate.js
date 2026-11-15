@@ -588,6 +588,41 @@ const MIGRATIONS = [
         return false;
       }
     }
+  },
+
+  // v6: UPD-8 — the six first_appearance_* collections are always `null` on the
+  // live API, but the pre-UPD-8 updater stored them as `"[]"` (the `|| []`
+  // coercion), so the server answered `[]` where the live API answers `null`.
+  // Convert the `"[]"` rows to SQL NULL so the server (parseCredits) emits
+  // `null`. The other ten collections are never null on the live API, so they
+  // keep their `"[]"`/populated values. Idempotent: a re-run is a no-op (the
+  // rows are already NULL). One transaction per column keeps the WAL bounded on
+  // the ~1.1M-row table; a failure after a committed column is safe because the
+  // backfill is idempotent and the migration re-runs on the next sync.
+  {
+    version: 6,
+    name: "UPD-8 cv_issue first_appearance_* '[]'→NULL",
+    up(conn, log) {
+      const issueCols = tableColumns(conn, "cv_issue");
+      const cols = [
+        "first_appearance_characters", "first_appearance_concepts",
+        "first_appearance_locations", "first_appearance_objects",
+        "first_appearance_storyarcs", "first_appearance_teams"
+      ].filter((c) => issueCols.includes(c));
+      if (cols.length === 0) return true; // no cv_issue table (fresh DB) or no columns
+      try {
+        for (const c of cols) {
+          inTransaction(conn, () => {
+            const r = conn.prepare(`UPDATE cv_issue SET ${c} = NULL WHERE ${c} = '[]'`).run();
+            log(`  Set ${r.changes} ${c} rows from "[]" to NULL.`);
+          });
+        }
+        return true;
+      } catch (e) {
+        log(`  Warning: first_appearance_* backfill failed: ${e.message}`);
+        return false;
+      }
+    }
   }
 ];
 

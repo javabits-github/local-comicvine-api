@@ -1823,7 +1823,9 @@ test("emits every stored issue field (SRV-19)", async () => {
       J([{ id: 3, original_url: imageUrl, caption: null, image_tags: "All Images" }]),
       null, "https://comicvine.gamespot.com/api/issue/4000-2797/", deck,
       "2008-06-06 11:09:57", "2022-07-12 02:21:13", J([]), J([]), J([]), J([]),
-      J([{ id: 4, name: "A Character" }]), J([]), J([]), J([]), J([]), J([]), 0);
+      // UPD-8: the live API returns null (not []) for the six first_appearance_*;
+      // the populated one exercises the array path, the five NULLs the null path.
+      J([{ id: 4, name: "A Character" }]), null, null, null, null, null, 0);
   // A live review object is stored as JSON text by the updater's jsonify.
   const review = {
     id: 4457,
@@ -1874,6 +1876,11 @@ test("emits every stored issue field (SRV-19)", async () => {
     });
     assert.deepEqual(result.character_credits, [{ id: 1, name: "Hulk" }]);
     assert.deepEqual(result.first_appearance_characters, [{ id: 4, name: "A Character" }]);
+    // UPD-8: the five NULL first_appearance_* collections emit null (the live
+    // API shape), not [] — the pre-UPD-8 "[]" storage would have emitted [].
+    for (const c of ["first_appearance_concepts", "first_appearance_locations", "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"]) {
+      assert.equal(result[c], null, `${c} should be null`);
+    }
     assert.equal(result.image.original_url, imageUrl);
     assert.equal(result.image.image_tags, "All Images");
     assert.equal(result.image.icon_url, imageUrl.replace("/original/", "/square_avatar/"));

@@ -81,7 +81,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     const version = migrate(conn, makeLog());
     conn.close();
     assert.equal(version, SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 5);
+    assert.equal(SCHEMA_VERSION, 6);
 
     const db = new DatabaseSync(dbPath);
     const tables = tableNames(db);
@@ -114,7 +114,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     // The seven newer endpoints are seeded at the raw-dump snapshot date.
     const endpoints = db.prepare("SELECT endpoint FROM cv_sync_metadata ORDER BY endpoint").all().map((r) => r.endpoint);
     assert.deepEqual(endpoints, ["characters", "concepts", "locations", "objects", "powers", "storyarcs", "teams"]);
-    assert.equal(readSchemaVersion(db), 5);
+    assert.equal(readSchemaVersion(db), 6);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -129,7 +129,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
     const conn = new DatabaseSync(dbPath);
     const version = migrate(conn, makeLog());
     conn.close();
-    assert.equal(version, 5);
+    assert.equal(version, 6);
 
     const db = new DatabaseSync(dbPath);
     // v1: resume_state added.
@@ -160,7 +160,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
     assert.equal(ref.ref_type, "first");
     assert.equal(ref.issue_id, 4001);
     assert.ok(!columnNames(db, "cv_volume_issue_ref").includes("name"), "snapshot columns should be dropped");
-    assert.equal(readSchemaVersion(db), 5);
+    assert.equal(readSchemaVersion(db), 6);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -173,11 +173,11 @@ test("migrate() is a no-op on an already-migrated database (stamp at final)", ()
   const { dir, dbPath } = makeLegacyDb();
   try {
     const conn = new DatabaseSync(dbPath);
-    migrate(conn, makeLog()); // first run: applies everything, stamps 5
+    migrate(conn, makeLog()); // first run: applies everything, stamps 6
     const log = makeLog();
     const version = migrate(conn, log); // second run: nothing to do
     conn.close();
-    assert.equal(version, 5);
+    assert.equal(version, 6);
     assert.ok(!log.lines.some((l) => l.includes("Applying migration")),
       `no migrations should run, got: ${log.lines.join(" | ")}`);
   } finally {
@@ -198,9 +198,9 @@ test("a partially-migrated database (stamp 2) runs only the newer migrations", (
     const log = makeLog();
     const version = migrate(conn, log);
     conn.close();
-    assert.equal(version, 5);
+    assert.equal(version, 6);
     const applied = log.lines.filter((l) => l.includes("Applying migration")).map((l) => l.match(/v(\d+)/)[1]);
-    assert.deepEqual(applied, ["3", "4", "5"]);
+    assert.deepEqual(applied, ["3", "4", "5", "6"]);
   } finally {
     cleanupTempDir(dir);
   }
@@ -213,9 +213,9 @@ test("the CLI migrates a database with --db and reports the version", () => {
   try {
     const result = spawnSync(process.execPath, [path.join(__dirname, "..", "src", "migrate.js"), "--db", dbPath], { encoding: "utf8" });
     assert.equal(result.status, 0, `stderr: ${result.stderr}`);
-    assert.ok(result.stdout.includes("Schema version: 5"), result.stdout);
+    assert.ok(result.stdout.includes("Schema version: 6"), result.stdout);
     const db = new DatabaseSync(dbPath);
-    assert.equal(readSchemaVersion(db), 5);
+    assert.equal(readSchemaVersion(db), 6);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -236,11 +236,55 @@ test("the CLI rejects a missing database", () => {
 // ─── Module shape ─────────────────────────────────────────────────────────────
 
 test("MIGRATIONS is an ordered, versioned list", () => {
-  assert.equal(MIGRATIONS.length, 5);
+  assert.equal(MIGRATIONS.length, 6);
   const versions = MIGRATIONS.map((m) => m.version);
-  assert.deepEqual(versions, [1, 2, 3, 4, 5]);
+  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6]);
   for (const m of MIGRATIONS) {
     assert.equal(typeof m.up, "function");
     assert.equal(typeof m.name, "string");
+  }
+});
+
+// ─── v6 (UPD-8) in isolation ──────────────────────────────────────────────────
+
+test("v6 (UPD-8) converts '[]' first_appearance_* to NULL, leaving NULL/populated intact", () => {
+  const { dir, dbPath } = tempDb("upd8.db");
+  try {
+    const cols = ["first_appearance_characters", "first_appearance_concepts", "first_appearance_locations", "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"];
+    const conn = new DatabaseSync(dbPath);
+    conn.exec(
+      `CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, name TEXT, ` +
+      cols.map((c) => `${c} TEXT`).join(", ") + `);`
+    );
+    const insert = conn.prepare(
+      `INSERT INTO cv_issue (id, name, ${cols.join(", ")}) VALUES (?, ?, ${cols.map(() => "?").join(", ")})`
+    );
+    // Row 1: all six "[]" (the pre-UPD-8 storage of a null collection) → all NULL.
+    insert.run(1, "Issue 1", ...cols.map(() => "[]"));
+    // Row 2: all six already NULL (the UPD-7 window) → stay NULL.
+    insert.run(2, "Issue 2", ...cols.map(() => null));
+    // Row 3: one populated, the rest "[]" → the populated stays, the "[]" become NULL.
+    insert.run(3, "Issue 3", JSON.stringify([{ id: 4, name: "A Character" }]), ...cols.slice(1).map(() => "[]"));
+    conn.close();
+
+    const db = new DatabaseSync(dbPath);
+    const v6 = MIGRATIONS.find((m) => m.version === 6);
+    v6.up(db, makeLog());
+
+    const r1 = db.prepare("SELECT * FROM cv_issue WHERE id = 1").get();
+    for (const c of cols) assert.equal(r1[c], null, `row 1 ${c} should be NULL`);
+    const r2 = db.prepare("SELECT * FROM cv_issue WHERE id = 2").get();
+    for (const c of cols) assert.equal(r2[c], null, `row 2 ${c} should be NULL`);
+    const r3 = db.prepare("SELECT * FROM cv_issue WHERE id = 3").get();
+    assert.deepEqual(JSON.parse(r3.first_appearance_characters), [{ id: 4, name: "A Character" }]);
+    for (const c of cols.slice(1)) assert.equal(r3[c], null, `row 3 ${c} should be NULL`);
+
+    // Idempotent: a re-run is a no-op (the rows are already NULL).
+    v6.up(db, makeLog());
+    assert.equal(db.prepare("SELECT first_appearance_characters FROM cv_issue WHERE id = 1").get().first_appearance_characters, null);
+    assert.deepEqual(JSON.parse(db.prepare("SELECT first_appearance_characters FROM cv_issue WHERE id = 3").get().first_appearance_characters), [{ id: 4, name: "A Character" }]);
+    db.close();
+  } finally {
+    cleanupTempDir(dir);
   }
 });
