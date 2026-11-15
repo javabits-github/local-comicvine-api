@@ -281,8 +281,12 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   const pub = db.prepare("SELECT * FROM cv_publisher WHERE id=100").get();
   assert.equal(pub.name, "Acme Comics");
   assert.equal(pub.aliases, "Acme");
-  assert.equal(pub.characters, "[]");
-  assert.equal(pub.volumes, "[]");
+  // SRV-6a: the four collection columns are dropped by the v7 migration (the
+  // collections are historical, normalized into cv_publisher_credit); the mock
+  // publisher provides none, so there are no join rows for it.
+  assert.ok(!("characters" in pub), "characters column should be dropped");
+  assert.ok(!("volumes" in pub), "volumes column should be dropped");
+  assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_publisher_credit WHERE publisher_id=100").get().c, 0);
   assert.equal(pub.location_city, "NYC");
 
   // Person

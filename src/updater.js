@@ -575,15 +575,18 @@ class ComicVineUpdater {
         const imageUrl = image ? image.original_url : null;
         const exists = this.conn.prepare("SELECT id FROM cv_publisher WHERE id = ?").get(pubId);
 
+        // SRV-6a: the four relationship collections (characters, story_arcs,
+        // teams, volumes) are normalized into the cv_publisher_credit join table
+        // (the v7 migration backfills it from the legacy JSON columns and drops
+        // them). The live API's list response does not return them for publishers
+        // (the field_list never requests them), so they are historical — the
+        // upsert writes only the scalar columns and leaves the join rows alone.
         this.conn.prepare(`
           INSERT INTO cv_publisher
             (id, name, image_url, site_detail_url, aliases,
              deck, description, date_added, date_last_updated,
-             location_address, location_city, location_state,
-             characters, story_arcs, teams, volumes)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  COALESCE(?, '[]'), COALESCE(?, '[]'),
-                  COALESCE(?, '[]'), COALESCE(?, '[]'))
+             location_address, location_city, location_state)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             image_url = excluded.image_url,
@@ -602,8 +605,7 @@ class ComicVineUpdater {
           jsonify(pub.deck), jsonify(pub.description),
           jsonify(pub.date_added), jsonify(pub.date_last_updated),
           jsonify(pub.location_address), jsonify(pub.location_city),
-          jsonify(pub.location_state),
-          null, null, null, null
+          jsonify(pub.location_state)
         );
 
         if (exists) this.stats.publishers_updated++;

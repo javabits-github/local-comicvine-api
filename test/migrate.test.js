@@ -51,7 +51,7 @@ function makeLegacyDb() {
   const db = new DatabaseSync(dbPath);
   db.exec(`
     CREATE TABLE cv_sync_metadata (endpoint TEXT PRIMARY KEY, last_sync_date TEXT NOT NULL, last_sync_timestamp TEXT NOT NULL);
-    CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, api_detail_url TEXT);
+    CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, api_detail_url TEXT, characters TEXT, story_arcs TEXT, teams TEXT, volumes TEXT);
     CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, name TEXT, api_detail_url TEXT);
     CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, api_detail_url TEXT, character_credits TEXT, person_credits TEXT, first_issue TEXT, last_issue TEXT);
     CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, api_detail_url TEXT);
@@ -65,7 +65,11 @@ function makeLegacyDb() {
     .run(300, "Test Series", "https://comicvine.gamespot.com/api/volume/4050-300/",
          JSON.stringify([{ id: 1, name: "Hero", api_detail_url: "https://comicvine.gamespot.com/api/character/4005-1/" }]),
          JSON.stringify({ id: 4001, name: "Test Series #1" }));
-  db.prepare("INSERT INTO cv_publisher (id, name, api_detail_url) VALUES (?, ?, ?)").run(100, "Acme", "https://comicvine.gamespot.com/api/publisher/4050-100/");
+  db.prepare("INSERT INTO cv_publisher (id, name, api_detail_url, characters, story_arcs, teams, volumes) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(100, "Acme", "https://comicvine.gamespot.com/api/publisher/4050-100/",
+         JSON.stringify([{ id: 1, name: "A Character", api_detail_url: "https://comicvine.gamespot.com/api/character/4005-1/", site_detail_url: "https://comicvine.gamespot.com/a-character/4005-1/" }]),
+         "[]", "[]",
+         JSON.stringify([{ id: 2, name: "A Volume", api_detail_url: "https://comicvine.gamespot.com/api/volume/4050-2/", site_detail_url: "https://comicvine.gamespot.com/a-volume/4050-2/" }]));
   db.prepare("INSERT INTO cv_issue (id, name, api_detail_url) VALUES (?, ?, ?)").run(4001, "Test Series #1", "https://comicvine.gamespot.com/api/issue/4000-4001/");
   db.prepare("INSERT INTO cv_person (id, name, api_detail_url) VALUES (?, ?, ?)").run(200, "Jane", "https://comicvine.gamespot.com/api/person/4040-200/");
   db.close();
@@ -81,7 +85,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     const version = migrate(conn, makeLog());
     conn.close();
     assert.equal(version, SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 6);
+    assert.equal(SCHEMA_VERSION, 7);
 
     const db = new DatabaseSync(dbPath);
     const tables = tableNames(db);
@@ -94,7 +98,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // The join tables.
-    for (const t of ["cv_volume_credit", "cv_volume_issue_ref", "cv_concept_credit"]) {
+    for (const t of ["cv_volume_credit", "cv_volume_issue_ref", "cv_concept_credit", "cv_publisher_credit"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // FTS indexes for the seven created resource tables (the four legacy base
@@ -114,7 +118,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     // The seven newer endpoints are seeded at the raw-dump snapshot date.
     const endpoints = db.prepare("SELECT endpoint FROM cv_sync_metadata ORDER BY endpoint").all().map((r) => r.endpoint);
     assert.deepEqual(endpoints, ["characters", "concepts", "locations", "objects", "powers", "storyarcs", "teams"]);
-    assert.equal(readSchemaVersion(db), 6);
+    assert.equal(readSchemaVersion(db), 7);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -129,7 +133,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
     const conn = new DatabaseSync(dbPath);
     const version = migrate(conn, makeLog());
     conn.close();
-    assert.equal(version, 6);
+    assert.equal(version, 7);
 
     const db = new DatabaseSync(dbPath);
     // v1: resume_state added.
@@ -160,7 +164,20 @@ test("migrate() upgrades a legacy database to the final schema", () => {
     assert.equal(ref.ref_type, "first");
     assert.equal(ref.issue_id, 4001);
     assert.ok(!columnNames(db, "cv_volume_issue_ref").includes("name"), "snapshot columns should be dropped");
-    assert.equal(readSchemaVersion(db), 6);
+    // v7: the publisher collection JSON is normalized into cv_publisher_credit
+    // and the JSON columns are dropped (no presence bitmask — the live API is
+    // never null for these, so [] and null both yield no join rows).
+    const publisherCols = columnNames(db, "cv_publisher");
+    for (const c of ["characters", "story_arcs", "teams", "volumes"]) {
+      assert.ok(!publisherCols.includes(c), `${c} should be dropped`);
+    }
+    const pubCredit = db.prepare("SELECT * FROM cv_publisher_credit WHERE publisher_id = 100 ORDER BY credit_type").all();
+    assert.equal(pubCredit.length, 2, "one character + one volume (story_arcs/teams were [])");
+    assert.deepEqual(
+      pubCredit.map((r) => [r.credit_type, r.credit_id, r.name]),
+      [["character", 1, "A Character"], ["volume", 2, "A Volume"]]
+    );
+    assert.equal(readSchemaVersion(db), 7);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -173,11 +190,11 @@ test("migrate() is a no-op on an already-migrated database (stamp at final)", ()
   const { dir, dbPath } = makeLegacyDb();
   try {
     const conn = new DatabaseSync(dbPath);
-    migrate(conn, makeLog()); // first run: applies everything, stamps 6
+    migrate(conn, makeLog()); // first run: applies everything, stamps 7
     const log = makeLog();
     const version = migrate(conn, log); // second run: nothing to do
     conn.close();
-    assert.equal(version, 6);
+    assert.equal(version, 7);
     assert.ok(!log.lines.some((l) => l.includes("Applying migration")),
       `no migrations should run, got: ${log.lines.join(" | ")}`);
   } finally {
@@ -198,9 +215,9 @@ test("a partially-migrated database (stamp 2) runs only the newer migrations", (
     const log = makeLog();
     const version = migrate(conn, log);
     conn.close();
-    assert.equal(version, 6);
+    assert.equal(version, 7);
     const applied = log.lines.filter((l) => l.includes("Applying migration")).map((l) => l.match(/v(\d+)/)[1]);
-    assert.deepEqual(applied, ["3", "4", "5", "6"]);
+    assert.deepEqual(applied, ["3", "4", "5", "6", "7"]);
   } finally {
     cleanupTempDir(dir);
   }
@@ -213,9 +230,9 @@ test("the CLI migrates a database with --db and reports the version", () => {
   try {
     const result = spawnSync(process.execPath, [path.join(__dirname, "..", "src", "migrate.js"), "--db", dbPath], { encoding: "utf8" });
     assert.equal(result.status, 0, `stderr: ${result.stderr}`);
-    assert.ok(result.stdout.includes("Schema version: 6"), result.stdout);
+    assert.ok(result.stdout.includes("Schema version: 7"), result.stdout);
     const db = new DatabaseSync(dbPath);
-    assert.equal(readSchemaVersion(db), 6);
+    assert.equal(readSchemaVersion(db), 7);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -236,9 +253,9 @@ test("the CLI rejects a missing database", () => {
 // ─── Module shape ─────────────────────────────────────────────────────────────
 
 test("MIGRATIONS is an ordered, versioned list", () => {
-  assert.equal(MIGRATIONS.length, 6);
+  assert.equal(MIGRATIONS.length, 7);
   const versions = MIGRATIONS.map((m) => m.version);
-  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7]);
   for (const m of MIGRATIONS) {
     assert.equal(typeof m.up, "function");
     assert.equal(typeof m.name, "string");
@@ -283,6 +300,63 @@ test("v6 (UPD-8) converts '[]' first_appearance_* to NULL, leaving NULL/populate
     v6.up(db, makeLog());
     assert.equal(db.prepare("SELECT first_appearance_characters FROM cv_issue WHERE id = 1").get().first_appearance_characters, null);
     assert.deepEqual(JSON.parse(db.prepare("SELECT first_appearance_characters FROM cv_issue WHERE id = 3").get().first_appearance_characters), [{ id: 4, name: "A Character" }]);
+    db.close();
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
+// ─── v7 (SRV-6a) in isolation ─────────────────────────────────────────────────
+
+test("v7 (SRV-6a) normalizes publisher collections into cv_publisher_credit and drops the JSON columns", () => {
+  const { dir, dbPath } = tempDb("srv6a.db");
+  try {
+    const conn = new DatabaseSync(dbPath);
+    conn.exec(`
+      CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, characters TEXT, story_arcs TEXT, teams TEXT, volumes TEXT);
+      CREATE TABLE cv_publisher_credit (publisher_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (publisher_id, credit_type, position));
+    `);
+    const insert = conn.prepare("INSERT INTO cv_publisher (id, name, characters, story_arcs, teams, volumes) VALUES (?, ?, ?, ?, ?, ?)");
+    // Row 1: one character + one volume; story_arcs/teams are [].
+    insert.run(1, "Pub 1",
+      JSON.stringify([{ id: 10, name: "Char A", api_detail_url: "https://comicvine.gamespot.com/api/character/4005-10/", site_detail_url: "https://comicvine.gamespot.com/char-a/4005-10/" }]),
+      "[]", "[]",
+      JSON.stringify([{ id: 20, name: "Vol A", api_detail_url: "https://comicvine.gamespot.com/api/volume/4050-20/", site_detail_url: "https://comicvine.gamespot.com/vol-a/4050-20/" }]));
+    // Row 2: all four NULL (a pre-SRV-6a artifact) → no join rows.
+    insert.run(2, "Pub 2", null, null, null, null);
+    // Row 3: all four [] → no join rows.
+    insert.run(3, "Pub 3", "[]", "[]", "[]", "[]");
+    conn.close();
+
+    const db = new DatabaseSync(dbPath);
+    const v7 = MIGRATIONS.find((m) => m.version === 7);
+    v7.up(db, makeLog());
+
+    // The JSON columns are dropped.
+    const cols = columnNames(db, "cv_publisher");
+    for (const c of ["characters", "story_arcs", "teams", "volumes"]) {
+      assert.ok(!cols.includes(c), `${c} should be dropped`);
+    }
+    // Row 1: one character + one volume join row (story_arcs/teams were []).
+    const rows1 = db.prepare("SELECT credit_type, credit_id, name, api_detail_url, site_detail_url FROM cv_publisher_credit WHERE publisher_id = 1 ORDER BY credit_type").all();
+    assert.equal(rows1.length, 2);
+    assert.equal(rows1[0].credit_type, "character");
+    assert.equal(rows1[0].credit_id, 10);
+    assert.equal(rows1[0].name, "Char A");
+    assert.equal(rows1[0].api_detail_url, "https://comicvine.gamespot.com/api/character/4005-10/");
+    assert.equal(rows1[0].site_detail_url, "https://comicvine.gamespot.com/char-a/4005-10/");
+    assert.equal(rows1[1].credit_type, "volume");
+    assert.equal(rows1[1].credit_id, 20);
+    assert.equal(rows1[1].name, "Vol A");
+    assert.equal(rows1[1].api_detail_url, "https://comicvine.gamespot.com/api/volume/4050-20/");
+    assert.equal(rows1[1].site_detail_url, "https://comicvine.gamespot.com/vol-a/4050-20/");
+    // Rows 2 and 3: no join rows (NULL and [] both yield none).
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_publisher_credit WHERE publisher_id = 2").get().c, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_publisher_credit WHERE publisher_id = 3").get().c, 0);
+
+    // Idempotent: a re-run is a no-op (the columns are already dropped).
+    v7.up(db, makeLog());
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_publisher_credit WHERE publisher_id = 1").get().c, 2);
     db.close();
   } finally {
     cleanupTempDir(dir);

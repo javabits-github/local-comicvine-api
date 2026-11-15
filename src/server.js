@@ -352,6 +352,50 @@ function buildConceptResult(row, database) {
   return result;
 }
 
+// SRV-6a: the four publisher relationship collections, in the order the live API
+// emits them. credit_type in cv_publisher_credit maps to the field name.
+const PUBLISHER_CREDIT_FIELDS = {
+  character: "characters",
+  story_arc: "story_arcs",
+  team: "teams",
+  volume: "volumes"
+};
+
+// Rebuild a publisher credit entry with the exact key order the live API emits
+// (id, name, api_detail_url, site_detail_url) — id-first, like the volume credits
+// (creditRowToObject), unlike the concept credits' api_detail_url-first order.
+function publisherCreditRowToObject(row) {
+  return {
+    id: row.credit_id,
+    name: row.name,
+    api_detail_url: row.api_detail_url,
+    site_detail_url: row.site_detail_url
+  };
+}
+
+// SRV-6a: generate the four publisher collections from the cv_publisher_credit
+// join table (the v7 migration backfilled it from the legacy JSON columns). The
+// live API never returns null for these (always an array — verified against the
+// verbatim raw-API dump), so a publisher with no join rows emits [] for each (the
+// concepts pattern, UPD-14). Used only when the join table exists; buildResult's
+// JSON-column path covers pre-SRV-6a databases and test fixtures without it.
+function buildPublisherResult(row, database) {
+  const result = buildResult(row, "publisher");
+
+  const creditRows = database
+    .prepare("SELECT * FROM cv_publisher_credit WHERE publisher_id = ? ORDER BY credit_type, position")
+    .all(row.id);
+  const creditsByType = {};
+  for (const credit of creditRows) {
+    (creditsByType[credit.credit_type] ??= []).push(credit);
+  }
+  for (const [type, field] of Object.entries(PUBLISHER_CREDIT_FIELDS)) {
+    result[field] = (creditsByType[type] ?? []).map(publisherCreditRowToObject);
+  }
+
+  return result;
+}
+
 function buildResult(row, singular) {
   const has = (name) => Object.hasOwn(row, name);
   if (singular === "volume") {
@@ -782,6 +826,13 @@ function buildResourceConfig(database, resource) {
   // three (the live API is never null). Same pattern as the volume join tables.
   if (singular === "concept" && tableColumns(database, "cv_concept_credit").size > 0) {
    build = (row) => buildConceptResult(row, database);
+  }
+  // SRV-6a: generate the four publisher collections from the cv_publisher_credit
+  // join table once it exists (the v7 migration); otherwise buildResult reads the
+  // legacy JSON columns (test fixtures without the join table). The live API is
+  // never null for these, so a publisher with no join rows emits [] for each.
+  if (singular === "publisher" && tableColumns(database, "cv_publisher_credit").size > 0) {
+   build = (row) => buildPublisherResult(row, database);
   }
   }
 

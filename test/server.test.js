@@ -779,6 +779,50 @@ test("builds concept collections from the cv_concept_credit join (SRV-26)", asyn
   }
 });
 
+test("builds publisher collections from the cv_publisher_credit join (SRV-6a)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-publisher-join-test-"));
+  const joinDatabasePath = path.join(directory, "publisher-join.db");
+  const joinDatabase = new DatabaseSync(joinDatabasePath);
+  // SRV-6a: the four JSON collection columns are dropped by the v7 migration, so
+  // the table carries only the scalar columns (no characters/story_arcs/teams/volumes).
+  joinDatabase.exec("CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, image_url TEXT, site_detail_url TEXT, aliases TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, location_address TEXT, location_city TEXT, location_state TEXT)");
+  joinDatabase.exec("CREATE TABLE cv_publisher_credit (publisher_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (publisher_id, credit_type, position))");
+  joinDatabase.prepare("INSERT INTO cv_publisher (id, name, site_detail_url) VALUES (?, ?, ?)")
+      .run(1, "Acme Comics", "https://example.test/acme/");
+  // characters x2, volumes x1; story_arcs/teams have no rows (the live API emits []).
+  joinDatabase.prepare("INSERT INTO cv_publisher_credit (publisher_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "character", 0, 17, "Daredevil", "https://example.test/character/4005-17/", "https://example.test/daredevil");
+  joinDatabase.prepare("INSERT INTO cv_publisher_credit (publisher_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "character", 1, 18, "Spider-Man", "https://example.test/character/4005-18/", "https://example.test/spider-man");
+  joinDatabase.prepare("INSERT INTO cv_publisher_credit (publisher_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "volume", 0, 7300, "Witchblade", "https://example.test/volume/4050-7300/", "https://example.test/witchblade");
+  joinDatabase.close();
+
+  const joinServer = createApiServer(joinDatabasePath, () => {});
+  await new Promise((resolve) => joinServer.listen(0, "127.0.0.1", resolve));
+  const joinUrl = `http://127.0.0.1:${joinServer.address().port}`;
+
+  try {
+    const detail = await (await fetch(`${joinUrl}/api/publisher/4010-1/`)).json();
+    const result = detail.results;
+
+    // SRV-6a: the collections are generated from the join table, id-first key order.
+    assert.deepEqual(result.characters, [
+      { id: 17, name: "Daredevil", api_detail_url: "https://example.test/character/4005-17/", site_detail_url: "https://example.test/daredevil" },
+      { id: 18, name: "Spider-Man", api_detail_url: "https://example.test/character/4005-18/", site_detail_url: "https://example.test/spider-man" }
+    ]);
+    // story_arcs/teams have no join rows → [] (the live API never returns null).
+    assert.deepEqual(result.story_arcs, []);
+    assert.deepEqual(result.teams, []);
+    assert.deepEqual(result.volumes, [
+      { id: 7300, name: "Witchblade", api_detail_url: "https://example.test/volume/4050-7300/", site_detail_url: "https://example.test/witchblade" }
+    ]);
+  } finally {
+    await new Promise((resolve) => joinServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("derives first_appeared_in_issue from the issue id (UPD-15)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-concept-fai-test-"));
   const faiDatabasePath = path.join(directory, "concept-fai.db");
