@@ -990,6 +990,51 @@ test("builds person collections from the cv_person_credit join (SRV-6d)", async 
   }
 });
 
+test("parses the person death JSON column into the live-API object (SRV-33)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-person-death-test-"));
+  const deathDatabasePath = path.join(directory, "person-death.db");
+  const deathDatabase = new DatabaseSync(deathDatabasePath);
+  // SRV-33: death is a JSON-text column. localcv.db stores the keys in the order
+  // the updater saw ({date, timezone_type, timezone}); the live API returns
+  // {date, timezone, timezone_type}. The server must parse the stored JSON and
+  // reorder to the live key order (a bare parse would keep the wrong order).
+  deathDatabase.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, date_added TEXT, date_last_updated TEXT, death TEXT)");
+  deathDatabase.prepare("INSERT INTO cv_person (id, name, date_added, date_last_updated, death) VALUES (?, ?, ?, ?, ?)")
+      .run(1253, "Aaron Decedent", "2020-04-15 10:00:00", "2021-05-01 08:30:00",
+        J({ date: "2020-12-02 00:00:00.000000", timezone_type: 3, timezone: "America/Los_Angeles" }));
+  // A living person: death is SQL NULL and must stay null (not become an object).
+  deathDatabase.prepare("INSERT INTO cv_person (id, name, date_added) VALUES (?, ?, ?)")
+      .run(1254, "Aaron Living", "2020-04-15 10:00:00");
+  deathDatabase.close();
+
+  const deathServer = createApiServer(deathDatabasePath, () => {});
+  await new Promise((resolve) => deathServer.listen(0, "127.0.0.1", resolve));
+  const deathUrl = `http://127.0.0.1:${deathServer.address().port}`;
+
+  try {
+    // The decedent: death is emitted as the nested object in the live key order.
+    const decedent = await (await fetch(`${deathUrl}/api/person/4040-1253/?format=json&field_list=id,name,death`)).json();
+    assert.deepEqual(decedent.results.death, { date: "2020-12-02 00:00:00.000000", timezone: "America/Los_Angeles", timezone_type: 3 });
+    // deepEqual ignores key order, so assert the order explicitly: the live API
+    // emits {date, timezone, timezone_type}, not the stored {date, timezone_type, timezone}.
+    assert.deepEqual(Object.keys(decedent.results.death), ["date", "timezone", "timezone_type"]);
+
+    // The living person: death stays null.
+    const living = await (await fetch(`${deathUrl}/api/person/4040-1254/?format=json&field_list=id,name,death`)).json();
+    assert.equal(living.results.death, null);
+
+    // The list endpoint emits the same parsed object (both route through buildResult).
+    const list = await (await fetch(`${deathUrl}/api/people?format=json&field_list=id,name,death&sort=id:asc`)).json();
+    assert.deepEqual(list.results, [
+      { id: 1253, name: "Aaron Decedent", death: { date: "2020-12-02 00:00:00.000000", timezone: "America/Los_Angeles", timezone_type: 3 } },
+      { id: 1254, name: "Aaron Living", death: null }
+    ]);
+  } finally {
+    await new Promise((resolve) => deathServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("builds story arc collections from the cv_storyarc_credit join and scalar refs from inline columns (SRV-6b)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-storyarc-join-test-"));
   const joinDatabasePath = path.join(directory, "storyarc-join.db");

@@ -144,6 +144,35 @@ function parseJsonColumn(value) {
   return JSON.parse(value);
 }
 
+// SRV-33: death is stored as a JSON-text column (the updater's jsonify serializes
+// the live API's {date, timezone, timezone_type} object). The live API returns a
+// nested object, but the stored JSON keeps the key order the updater saw
+// ({date, timezone_type, timezone}), so a bare parse would emit the wrong key
+// order. Parse the stored JSON and rebuild the object in the live API's key order
+// ({date, timezone, timezone_type}), keeping only the keys that are present. SQL
+// NULL (a living person) and unparseable values become null.
+function parseDeath(value) {
+  if (value === null || value === undefined) return null;
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const result = {};
+  for (const key of ["date", "timezone", "timezone_type"]) {
+    if (Object.hasOwn(parsed, key)) result[key] = parsed[key];
+  }
+  // Preserve any unexpected keys (none in the current data) after the known ones.
+  for (const key of Object.keys(parsed)) {
+    if (!Object.hasOwn(result, key)) result[key] = parsed[key];
+  }
+  return result;
+}
+
 // SRV-19: has_staff_review is one column holding three shapes — 0 (the live
 // boolean false, coerced by the updater's jsonify), SQL NULL (rows synced before
 // the column existed), and a JSON-text review object. The live API returns
@@ -882,7 +911,11 @@ function buildResult(row, singular) {
   // column, matching publisher (SRV-21) / team (SRV-22) / concept (UPD-13).
   result.api_detail_url = buildApiDetailUrl("person", row.id);
   for (const field of ["aliases", "birth", "country", "deck", "description", "date_added", "date_last_updated", "death", "email", "hometown", "site_detail_url", "website"]) {
-   if (has(field)) result[field] = row[field];
+   if (!has(field)) continue;
+   // SRV-33: death is stored as a JSON-text column; parse it into the nested
+   // object the live API returns (reordered to the live key order). The other
+   // fields are plain scalars.
+   result[field] = field === "death" ? parseDeath(row[field]) : row[field];
   }
   // SRV-20: the live API emits the issue-credit count under its typo name; the
   // stored column keeps the corrected spelling (count_of_issue_appearances).
