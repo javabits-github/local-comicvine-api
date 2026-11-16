@@ -608,6 +608,52 @@ function buildStoryArcResult(row, database) {
   return result;
 }
 
+// SRV-6h: the four object relationship collections, in the order the live API
+// emits them. credit_type in cv_object_credit maps to the field name.
+const OBJECT_CREDIT_FIELDS = {
+  issue_credit: "issue_credits",
+  volume_credit: "volume_credits",
+  story_arc_credit: "story_arc_credits",
+  movie: "movies"
+};
+
+// Rebuild an object credit entry with the exact key order the stored JSON used
+// (id, name, api_detail_url, site_detail_url) — id-first, like the other credits.
+function objectCreditRowToObject(row) {
+  return {
+    id: row.credit_id,
+    name: row.name,
+    api_detail_url: row.api_detail_url,
+    site_detail_url: row.site_detail_url
+  };
+}
+
+// SRV-6h: generate the four object collections from the cv_object_credit join
+// table (the v11 migration backfilled it from the legacy JSON columns). Unlike
+// the other SRV-6 resources, the live API populates these (verified against the
+// verbatim raw-API dump — never null) and the updater refreshes them on every
+// sync, so the updater writes the join rows (live). An object with no join rows
+// emits [] for each. The first_appeared_in_issue ref is handled by buildResult's
+// object branch (the id + the LEFT JOIN display fields from the dispatch). Used
+// only when the join table exists; buildResult's JSON-column path covers
+// pre-SRV-6h databases and test fixtures without it.
+function buildObjectResult(row, database) {
+  const result = buildResult(row, "object");
+
+  const creditRows = database
+    .prepare("SELECT * FROM cv_object_credit WHERE object_id = ? ORDER BY credit_type, position")
+    .all(row.id);
+  const creditsByType = {};
+  for (const credit of creditRows) {
+    (creditsByType[credit.credit_type] ??= []).push(credit);
+  }
+  for (const [type, field] of Object.entries(OBJECT_CREDIT_FIELDS)) {
+    result[field] = (creditsByType[type] ?? []).map(objectCreditRowToObject);
+  }
+
+  return result;
+}
+
 function buildResult(row, singular) {
   const has = (name) => Object.hasOwn(row, name);
   if (singular === "volume") {
@@ -1078,6 +1124,17 @@ function buildResourceConfig(database, resource) {
   // join rows emits [] for each.
   if (singular === "person" && !has("created_characters") && tableColumns(database, "cv_person_credit").size > 0) {
    build = (row) => buildPersonResult(row, database);
+  }
+  // SRV-6h: generate the four object collections from the cv_object_credit join
+  // table once the v11 migration has dropped the legacy JSON columns. The
+  // issue_credits column is the completion marker — it is dropped in the same
+  // transaction as the other three, so its absence means the migration completed
+  // (a rolled-back migration keeps it). Otherwise buildResult reads the legacy
+  // JSON columns (pre-SRV-6h databases and test fixtures without the join table).
+  // The live API never returns null for the collections, so an object with no
+  // join rows emits [] for each.
+  if (singular === "object" && !has("issue_credits") && tableColumns(database, "cv_object_credit").size > 0) {
+   build = (row) => buildObjectResult(row, database);
   }
   }
 

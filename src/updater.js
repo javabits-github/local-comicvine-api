@@ -1510,6 +1510,21 @@ class ComicVineUpdater {
     this.log(`\n--- Syncing Objects ---${full ? " (FULL)" : ""}`);
     if (!this.conn) return;
 
+    // SRV-6h: the four relationship collections live in the cv_object_credit
+    // join table (the JSON columns were dropped by the v11 migration). The live
+    // API populates these (never null) and the field_list refreshes them on every
+    // sync, so the updater writes the join rows (live): DELETE the existing rows
+    // for each (object, type) and re-INSERT from the API response. Prepared once
+    // and reused across the sync (the connection is stable for the run).
+    const insertObjectCredit = this.conn.prepare(`
+      INSERT INTO cv_object_credit
+        (object_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const deleteObjectCredits = this.conn.prepare(
+      "DELETE FROM cv_object_credit WHERE object_id = ? AND credit_type = ?"
+    );
+
     let offset = 0;
     const limit = 100;
 
@@ -1545,9 +1560,8 @@ class ComicVineUpdater {
           INSERT INTO cv_object
             (id, name, aliases, deck, description, start_year,
              date_added, date_last_updated, image_url, site_detail_url,
-             first_appeared_in_issue_id, count_of_issue_appearances,
-             issue_credits, volume_credits, story_arc_credits, movies)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             first_appeared_in_issue_id, count_of_issue_appearances)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             aliases = excluded.aliases,
@@ -1559,21 +1573,36 @@ class ComicVineUpdater {
             image_url = excluded.image_url,
             site_detail_url = excluded.site_detail_url,
             first_appeared_in_issue_id = COALESCE(excluded.first_appeared_in_issue_id, cv_object.first_appeared_in_issue_id),
-            count_of_issue_appearances = excluded.count_of_issue_appearances,
-            issue_credits = excluded.issue_credits,
-            volume_credits = excluded.volume_credits,
-            story_arc_credits = excluded.story_arc_credits,
-            movies = excluded.movies
+            count_of_issue_appearances = excluded.count_of_issue_appearances
         `).run(
           objectId, jsonify(object.name), jsonify(object.aliases),
           jsonify(object.deck), jsonify(object.description),
           jsonify(object.start_year),
           jsonify(object.date_added), jsonify(object.date_last_updated),
           imageUrl, object.site_detail_url, firstAppearedId,
-          jsonify(object.count_of_issue_appearances),
-          jsonify(object.issue_credits), jsonify(object.volume_credits),
-          jsonify(object.story_arc_credits), jsonify(object.movies)
+          jsonify(object.count_of_issue_appearances)
         );
+
+        // SRV-6h: the four relationship collections as join rows (live — the
+        // field_list refreshes them on every sync). A null/absent collection
+        // (the API never sends one, but be defensive) deletes the rows and
+        // inserts none, so the server emits [].
+        for (const [col, type] of [
+          ["issue_credits", "issue_credit"],
+          ["volume_credits", "volume_credit"],
+          ["story_arc_credits", "story_arc_credit"],
+          ["movies", "movie"]
+        ]) {
+          const entries = Array.isArray(object[col]) ? object[col] : [];
+          deleteObjectCredits.run(objectId, type);
+          entries.forEach((entry, position) => {
+            insertObjectCredit.run(
+              objectId, type, position,
+              entry.id ?? null, entry.name ?? null,
+              entry.api_detail_url ?? null, entry.site_detail_url ?? null
+            );
+          });
+        }
 
         if (exists) this.stats.objects_updated++;
         else this.stats.objects_added++;

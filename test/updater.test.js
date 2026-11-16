@@ -441,7 +441,17 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.equal(object.start_year, "1990");
   assert.equal(object.count_of_issue_appearances, 3);
   assert.equal(object.first_appeared_in_issue_id, 4001);
-  assert.equal(JSON.parse(object.issue_credits)[0].name, "Test Series #1");
+  // SRV-6h: the four collection columns are dropped by the v11 migration (the
+  // collections are live, normalized into cv_object_credit); the mock object
+  // provides one issue_credit and empty volume/story_arc/movie collections, so
+  // there is exactly one join row.
+  assert.ok(!("issue_credits" in object), "issue_credits column should be dropped");
+  assert.ok(!("movies" in object), "movies column should be dropped");
+  const objectCredit = db.prepare("SELECT * FROM cv_object_credit WHERE object_id=960").all();
+  assert.equal(objectCredit.length, 1);
+  assert.equal(objectCredit[0].credit_type, "issue_credit");
+  assert.equal(objectCredit[0].credit_id, 4001);
+  assert.equal(objectCredit[0].name, "Test Series #1");
 
   // Metadata
   const meta = db.prepare("SELECT * FROM cv_sync_metadata WHERE endpoint='publishers'").get();

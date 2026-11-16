@@ -228,14 +228,16 @@ function ensureResourceTables(conn, log) {
     )
   `);
   // SRV-3: object — the same shape as location (17 fields, verified against
-  // the verbatim raw-API dump on 2026-11-14).
+  // the verbatim raw-API dump on 2026-11-14). SRV-6h: the four relationship
+  // collections (issue_credits, volume_credits, story_arc_credits, movies) live
+  // in the cv_object_credit join table (ensureJoinTables); the JSON columns are
+  // dropped by the v11 migration.
   conn.exec(`
     CREATE TABLE IF NOT EXISTS cv_object (
       id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT,
       description TEXT, start_year TEXT, date_added TEXT, date_last_updated TEXT,
       image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER,
-      count_of_issue_appearances INTEGER,
-      issue_credits TEXT, volume_credits TEXT, story_arc_credits TEXT, movies TEXT
+      count_of_issue_appearances INTEGER
     )
   `);
   // Seed last_sync_date for new endpoints at the raw-dump snapshot date.
@@ -390,6 +392,31 @@ function ensureJoinTables(conn, log) {
   conn.exec(`
     CREATE INDEX IF NOT EXISTS idx_storyarc_credit_type
       ON cv_storyarc_credit (credit_type, credit_id)
+  `);
+  // SRV-6h: the four object relationship collections (issue_credits,
+  // volume_credits, story_arc_credits, movies) normalized into a single join
+  // table (the publisher pattern, SRV-6a — no count column, since the entries
+  // carry none). Unlike the other SRV-6 resources, the live API populates these
+  // (verified against the verbatim raw-API dump: issue_credits 4,713 populated /
+  // 301 []; volume_credits 4,713 / 301; story_arc_credits 1,195 / 3,819; movies
+  // 686 / 4,328 — never null), and the updater's field_list refreshes them on
+  // every sync, so the updater writes the join rows (live) rather than leaving
+  // them historical. An object with no join rows emits [] for each.
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_object_credit (
+      object_id INTEGER NOT NULL,
+      credit_type TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      credit_id INTEGER,
+      name TEXT,
+      api_detail_url TEXT,
+      site_detail_url TEXT,
+      PRIMARY KEY (object_id, credit_type, position)
+    )
+  `);
+  conn.exec(`
+    CREATE INDEX IF NOT EXISTS idx_object_credit_type
+      ON cv_object_credit (credit_type, credit_id)
   `);
 }
 
@@ -1247,6 +1274,111 @@ const MIGRATIONS = [
       } catch (e) {
         try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
         log(`  Warning: could not normalize story arcs: ${e.message}`, { force: true });
+        return false;
+      }
+    }
+  },
+
+  // v11: SRV-6h — the four object JSON collections (issue_credits,
+  // volume_credits, story_arc_credits, movies) are normalized into the
+  // cv_object_credit join table (the publisher pattern, SRV-6a — no count
+  // column, since the entries carry none). Unlike the other SRV-6 resources,
+  // the live API populates these (verified against the verbatim raw-API dump:
+  // issue_credits 4,713 populated / 301 []; volume_credits 4,713 / 301;
+  // story_arc_credits 1,195 / 3,819; movies 686 / 4,328 — never null), and the
+  // updater's field_list refreshes them on every sync, so the updater writes the
+  // join rows (live) rather than leaving them historical. An object with no join
+  // rows emits [] for each (the live API never returns null).
+  //
+  // It backfills the join table from the JSON columns and then drops those
+  // columns. It is a no-op when the JSON columns are already gone (final schema)
+  // or the table is absent (a fresh database has the final schema with no JSON
+  // columns; localcv.db has no cv_object table at all, so this is a no-op there).
+  {
+    version: 11,
+    name: "SRV-6h object normalization",
+    up(conn, log) {
+      const objectCols = tableColumns(conn, "cv_object");
+      const jsonCols = [
+        "issue_credits", "volume_credits", "story_arc_credits", "movies"
+      ].filter((c) => objectCols.includes(c));
+      // Nothing to migrate if the JSON columns are already gone (final schema) or
+      // the table is absent (a fresh database / localcv.db has no cv_object).
+      if (jsonCols.length === 0) return true;
+
+      log("  Normalizing objects into cv_object_credit...");
+      try {
+        const creditTypes = {
+          issue_credits: "issue_credit",
+          volume_credits: "volume_credit",
+          story_arc_credits: "story_arc_credit",
+          movies: "movie"
+        };
+        const creditTypeEntries = Object.entries(creditTypes).filter(([col]) => objectCols.includes(col));
+        const insertCredit = conn.prepare(
+          `INSERT OR REPLACE INTO cv_object_credit
+             (object_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        const deleteCredits = conn.prepare(
+          "DELETE FROM cv_object_credit WHERE object_id = ? AND credit_type = ?"
+        );
+
+        // Process in id-ordered batches so memory stays bounded. The
+        // DELETE-then-INSERT per (object, type) makes the migration idempotent
+        // on re-run. One transaction per batch keeps the WAL bounded; a failure
+        // after a committed batch is safe because the migration is idempotent
+        // and the column drop runs only after every batch has committed.
+        const batchSize = 2000;
+        let minId = null;
+        let migrated = 0;
+        for (;;) {
+          const rows = conn.prepare(
+            `SELECT * FROM cv_object WHERE id > ? ORDER BY id LIMIT ?`
+          ).all(minId ?? 0, batchSize);
+          if (rows.length === 0) break;
+
+          conn.exec("BEGIN");
+          for (const row of rows) {
+            for (const [col, type] of creditTypeEntries) {
+              const raw = row[col];
+              if (raw === null || raw === undefined) continue; // null: no rows
+              let entries;
+              try {
+                entries = JSON.parse(raw);
+              } catch {
+                continue;
+              }
+              if (!Array.isArray(entries)) continue;
+              deleteCredits.run(row.id, type);
+              entries.forEach((entry, position) => {
+                insertCredit.run(
+                  row.id, type, position,
+                  entry.id ?? null, entry.name ?? null,
+                  entry.api_detail_url ?? null, entry.site_detail_url ?? null
+                );
+              });
+            }
+            migrated++;
+          }
+          conn.exec("COMMIT");
+
+          minId = rows[rows.length - 1].id;
+          log(`  Migrated ${migrated} objects...`);
+          if (rows.length < batchSize) break;
+        }
+
+        // Drop the now-redundant JSON columns to complete the normalization.
+        conn.exec("BEGIN");
+        for (const col of jsonCols) {
+          conn.exec(`ALTER TABLE cv_object DROP COLUMN ${col}`);
+        }
+        conn.exec("COMMIT");
+        log(`  Normalized objects for ${migrated} objects.`);
+        return true;
+      } catch (e) {
+        try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
+        log(`  Warning: could not normalize objects: ${e.message}`, { force: true });
         return false;
       }
     }

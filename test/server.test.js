@@ -970,6 +970,53 @@ test("builds story arc collections from the cv_storyarc_credit join and scalar r
   }
 });
 
+test("builds object collections from the cv_object_credit join (SRV-6h)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-object-join-test-"));
+  const joinDatabasePath = path.join(directory, "object-join.db");
+  const joinDatabase = new DatabaseSync(joinDatabasePath);
+  // SRV-6h: the four JSON collection columns are dropped by the v11 migration, so
+  // the table carries only the scalar columns (no issue_credits/volume_credits/
+  // story_arc_credits/movies).
+  joinDatabase.exec("CREATE TABLE cv_object (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, start_year TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue_id INTEGER, count_of_issue_appearances INTEGER)");
+  joinDatabase.exec("CREATE TABLE cv_object_credit (object_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (object_id, credit_type, position))");
+  joinDatabase.prepare("INSERT INTO cv_object (id, name, site_detail_url, first_appeared_in_issue_id, count_of_issue_appearances) VALUES (?, ?, ?, ?, ?)")
+      .run(960, "Test Object", "https://example.test/test-object/", 4001, 3);
+  // issue_credit x1, volume_credit x1, movie x1; story_arc_credit has no rows
+  // (the live API emits []).
+  joinDatabase.prepare("INSERT INTO cv_object_credit (object_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(960, "issue_credit", 0, 30, "Issue A", "https://example.test/issue/4000-30/", "https://example.test/issue-a");
+  joinDatabase.prepare("INSERT INTO cv_object_credit (object_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(960, "volume_credit", 0, 3451, "Volume A", "https://example.test/volume/4050-3451/", "https://example.test/volume-a");
+  joinDatabase.prepare("INSERT INTO cv_object_credit (object_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(960, "movie", 0, 50, "Movie A", "https://example.test/movie/4070-50/", "https://example.test/movie-a");
+  joinDatabase.close();
+
+  const joinServer = createApiServer(joinDatabasePath, () => {});
+  await new Promise((resolve) => joinServer.listen(0, "127.0.0.1", resolve));
+  const joinUrl = `http://127.0.0.1:${joinServer.address().port}`;
+
+  try {
+    const detail = await (await fetch(`${joinUrl}/api/object/4055-960/`)).json();
+    const result = detail.results;
+
+    // SRV-6h: the collections are generated from the join table, id-first key order.
+    assert.deepEqual(result.issue_credits, [
+      { id: 30, name: "Issue A", api_detail_url: "https://example.test/issue/4000-30/", site_detail_url: "https://example.test/issue-a" }
+    ]);
+    assert.deepEqual(result.volume_credits, [
+      { id: 3451, name: "Volume A", api_detail_url: "https://example.test/volume/4050-3451/", site_detail_url: "https://example.test/volume-a" }
+    ]);
+    assert.deepEqual(result.movies, [
+      { id: 50, name: "Movie A", api_detail_url: "https://example.test/movie/4070-50/", site_detail_url: "https://example.test/movie-a" }
+    ]);
+    // story_arc_credit has no join rows → [] (the live API never returns null).
+    assert.deepEqual(result.story_arc_credits, []);
+  } finally {
+    await new Promise((resolve) => joinServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("derives first_appeared_in_issue from the issue id (UPD-15)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-concept-fai-test-"));
   const faiDatabasePath = path.join(directory, "concept-fai.db");
