@@ -1304,14 +1304,19 @@ function buildResourceConfig(database, resource) {
   const subquery = `SELECT ${selectExtra} FROM ${from}`;
   // SRV-5: detect the resource's FTS5 trigram table (created by the updater).
   // It must exist, cover the searchable text columns, and be populated; any of
-  // those missing means the resource falls back to LIKE matching. The FTS table
-  // is external-content, so its row count tracks the base table only after a
-  // rebuild — gate on > 0 so an empty index does not silently match nothing.
+  // those missing means the resource falls back to LIKE matching.
+  // SRV-32: the FTS table is external-content, so a bare COUNT(*) on the virtual
+  // table reads the external (base) content, not the index — it returns the base
+  // table's row count even after the index is emptied (delete-all), so the old
+  // `> 0` gate passed whenever the base table had rows and a MATCH against the
+  // empty index silently matched nothing. Gate on the FTS5 `_data` shadow table
+  // instead: its rows track the index itself (exactly 2 structural rows when
+  // empty, more once populated — an FTS5 internal), so `> 2` means "populated".
   const ftsTable = `${resource.table}_fts`;
   const ftsColumns = tableColumns(database, ftsTable);
   let ftsEnabled = false;
   if (ftsColumns.size > 0) {
-    try { ftsEnabled = database.prepare(`SELECT COUNT(*) AS count FROM ${ftsTable}`).get().count > 0; }
+    try { ftsEnabled = database.prepare(`SELECT COUNT(*) AS count FROM ${ftsTable}_data`).get().count > 2; }
     catch { ftsEnabled = false; }
   }
   return { subquery, alias, columns, build, singular, table: resource.table, ftsTable: ftsEnabled ? ftsTable : null, ftsColumns };

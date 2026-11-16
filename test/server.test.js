@@ -203,6 +203,48 @@ test("searches and filters text fields against the FTS trigram index", async () 
   }
 });
 
+test("search falls back to LIKE when the FTS index is empty (SRV-32)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-fts-empty-"));
+  const ftsDatabasePath = path.join(directory, "fts-empty.db");
+  const ftsDatabase = new DatabaseSync(ftsDatabasePath);
+  ftsDatabase.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, deck TEXT, description TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, image_url TEXT, site_detail_url TEXT, api_detail_url TEXT, date_added TEXT, date_last_updated TEXT)");
+  ftsDatabase.prepare("INSERT INTO cv_volume (id, name, aliases, deck, description, start_year, count_of_issues) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(1, "Witchblade", "Witchblade (1995)", "A supernatural series", "long description", "1995", 185);
+  ftsDatabase.prepare("INSERT INTO cv_volume (id, name, deck, description) VALUES (?, ?, ?, ?)")
+      .run(2, "Dune", "A desert epic", "desc");
+  // An external-content FTS5 index, as the updater creates (SRV-5).
+  ftsDatabase.exec("CREATE VIRTUAL TABLE cv_volume_fts USING fts5(name, aliases, deck, description, content='cv_volume', content_rowid='id', tokenize='trigram case_sensitive 0')");
+  // Populate the index, then empty it (delete-all) — the interrupted-sync state:
+  // the base table has rows but the index does not.
+  ftsDatabase.exec("INSERT INTO cv_volume_fts(cv_volume_fts) VALUES('rebuild')");
+  ftsDatabase.exec("INSERT INTO cv_volume_fts(cv_volume_fts) VALUES('delete-all')");
+  // Sanity: the index is genuinely empty, so any search result must come from the
+  // LIKE fallback, not the (empty) FTS index.
+  assert.equal(ftsDatabase.prepare("SELECT COUNT(*) AS c FROM cv_volume_fts WHERE cv_volume_fts MATCH 'name:\"witchblade\"'").get().c, 0);
+  ftsDatabase.close();
+
+  const ftsServer = createApiServer(ftsDatabasePath, () => {});
+  await new Promise((resolve) => ftsServer.listen(0, "127.0.0.1", resolve));
+  const ftsUrl = `http://127.0.0.1:${ftsServer.address().port}`;
+
+  try {
+    // With the index empty, the FTS gate must fall back to LIKE so search still
+    // matches. The SRV-32 bug: the old gate read the base table's row count (via
+    // the external-content virtual table) and used the empty index, so a MATCH
+    // silently matched nothing.
+    const search = await (await fetch(`${ftsUrl}/api/search/?query=witchblade&resources=volume`)).json();
+    assert.equal(search.number_of_total_results, 1);
+    assert.equal(search.results[0].id, 1);
+
+    const duneSearch = await (await fetch(`${ftsUrl}/api/search/?query=dune&resources=volume`)).json();
+    assert.equal(duneSearch.number_of_total_results, 1);
+    assert.equal(duneSearch.results[0].id, 2);
+  } finally {
+    await new Promise((resolve) => ftsServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("builds volume first/last issue refs from the cv_issue join (SRV-6c)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-join-test-"));
   const joinDatabasePath = path.join(directory, "join.db");
