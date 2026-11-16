@@ -341,6 +341,20 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   // Story arc
   const arc = db.prepare("SELECT * FROM cv_storyarc WHERE id=600").get();
   assert.equal(arc.name, "Test Arc");
+  // SRV-6b: the two scalar refs are stored as inline id + display fields +
+  // key_order (the JSON columns are dropped by the v10 migration). The mock
+  // story arc provides publisher and first_appeared_in_issue, so the inline
+  // columns are populated; it provides no collections, so there are no join
+  // rows.
+  assert.ok(!("publisher" in arc), "publisher column should be dropped");
+  assert.ok(!("first_appeared_in_issue" in arc), "first_appeared_in_issue column should be dropped");
+  assert.ok(!("issues" in arc), "issues column should be dropped");
+  assert.ok(!("movies" in arc), "movies column should be dropped");
+  assert.equal(arc.publisher_id, 100);
+  assert.equal(arc.publisher_name, "Acme Comics");
+  assert.equal(arc.first_appeared_in_issue_id, 4001);
+  assert.equal(arc.first_appeared_in_issue_name, "Test Series #1");
+  assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_storyarc_credit WHERE storyarc_id=600").get().c, 0);
 
   // Concept
   const concept = db.prepare("SELECT * FROM cv_concept WHERE id=700").get();

@@ -928,6 +928,48 @@ test("builds person collections from the cv_person_credit join (SRV-6d)", async 
   }
 });
 
+test("builds story arc collections from the cv_storyarc_credit join and scalar refs from inline columns (SRV-6b)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-storyarc-join-test-"));
+  const joinDatabasePath = path.join(directory, "storyarc-join.db");
+  const joinDatabase = new DatabaseSync(joinDatabasePath);
+  // SRV-6b: the four JSON columns are dropped by the v10 migration, so the table
+  // carries the inline scalar-ref columns (no publisher/first_appeared_in_issue/
+  // issues/movies JSON). The story arc publisher ref carries a site_detail_url
+  // the team's lacks, so it gets a fourth inline column.
+  joinDatabase.exec("CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, publisher_id INTEGER, publisher_name TEXT, publisher_site_detail_url TEXT, publisher_key_order TEXT, first_appeared_in_issue_id INTEGER, first_appeared_in_issue_name TEXT, first_appeared_in_issue_issue_number TEXT, first_appeared_in_issue_key_order TEXT)");
+  joinDatabase.exec("CREATE TABLE cv_storyarc_credit (storyarc_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (storyarc_id, credit_type, position))");
+  joinDatabase.prepare("INSERT INTO cv_storyarc (id, name, site_detail_url, publisher_id, publisher_name, publisher_site_detail_url, publisher_key_order, first_appeared_in_issue_id, first_appeared_in_issue_name, first_appeared_in_issue_issue_number, first_appeared_in_issue_key_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(3000, "Secret Wars", "https://example.test/secret-wars/", 31, "Marvel", "https://example.test/marvel/", JSON.stringify(["id", "name", "api_detail_url", "site_detail_url"]), 12345, "Marvel Super Heroes Secret Wars", "1", JSON.stringify(["id", "name", "issue_number", "api_detail_url"]));
+  // issue x1 (emitted as `issues`); movie has no rows (the live API emits []).
+  joinDatabase.prepare("INSERT INTO cv_storyarc_credit (storyarc_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(3000, "issue", 0, 12345, "Marvel Super Heroes Secret Wars", "https://example.test/issue/4000-12345/", "https://example.test/secret-wars-1");
+  joinDatabase.close();
+
+  const joinServer = createApiServer(joinDatabasePath, () => {});
+  await new Promise((resolve) => joinServer.listen(0, "127.0.0.1", resolve));
+  const joinUrl = `http://127.0.0.1:${joinServer.address().port}`;
+
+  try {
+    const detail = await (await fetch(`${joinUrl}/api/story_arc/4045-3000/`)).json();
+    const result = detail.results;
+
+    // SRV-6b: the scalar refs are built from the inline columns, honoring the
+    // stored key order (id-first here) and deriving api_detail_url from the id.
+    // The story arc publisher ref carries a site_detail_url the team's lacks.
+    assert.deepEqual(result.publisher, { id: 31, name: "Marvel", api_detail_url: "https://comicvine.gamespot.com/api/publisher/4010-31/", site_detail_url: "https://example.test/marvel/" });
+    assert.deepEqual(result.first_appeared_in_issue, { id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1", api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_issue/4000-12345/" });
+    // The collections are generated from the join table, id-first key order.
+    assert.deepEqual(result.issues, [
+      { id: 12345, name: "Marvel Super Heroes Secret Wars", api_detail_url: "https://example.test/issue/4000-12345/", site_detail_url: "https://example.test/secret-wars-1" }
+    ]);
+    // movie has no join rows → [] (the live API never returns null).
+    assert.deepEqual(result.movies, []);
+  } finally {
+    await new Promise((resolve) => joinServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("derives first_appeared_in_issue from the issue id (UPD-15)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-concept-fai-test-"));
   const faiDatabasePath = path.join(directory, "concept-fai.db");

@@ -69,7 +69,9 @@ function inTransaction(conn, fn) {
 // ref (or one without an id) so the caller stores NULLs. The key_order is the
 // ref's exact key order (a JSON array) so the server can re-emit the object
 // byte-for-byte; api_detail_url is in the key order but is derived from the id
-// on output (not stored). issue_number is captured only for first_appeared_in_issue.
+// on output (not stored). issue_number is captured only for first_appeared_in_issue;
+// site_detail_url only for the story arc publisher ref (SRV-6b — the team's
+// publisher ref carries no site_detail_url, so the team migration ignores it).
 function extractScalarRef(raw, hasIssueNumber) {
   if (raw === null || raw === undefined) return null;
   let obj;
@@ -80,6 +82,7 @@ function extractScalarRef(raw, hasIssueNumber) {
     id: obj.id,
     name: obj.name ?? null,
     issue_number: hasIssueNumber ? (obj.issue_number ?? null) : null,
+    site_detail_url: obj.site_detail_url ?? null,
     key_order: JSON.stringify(Object.keys(obj))
   };
 }
@@ -164,12 +167,22 @@ function ensureResourceTables(conn, log) {
       first_appeared_in_issue_issue_number TEXT, first_appeared_in_issue_key_order TEXT
     )
   `);
+  // SRV-6b: the two scalar refs (publisher, first_appeared_in_issue) are stored
+  // as id + inline display fields + key_order (byte-for-byte safe — the updater
+  // refreshes them in lockstep with the story arc row, so a LEFT JOIN would
+  // diverge if the referenced row were re-synced after a rename). The two
+  // relationship collections (issues, movies) live in the cv_storyarc_credit
+  // join table (ensureJoinTables).
   conn.exec(`
     CREATE TABLE IF NOT EXISTS cv_storyarc (
-      id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT,
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT,
       count_of_issue_appearances INTEGER, deck TEXT, description TEXT,
       date_added TEXT, date_last_updated TEXT, image_url TEXT,
-      site_detail_url TEXT, first_appeared_in_issue TEXT, issues TEXT, movies TEXT
+      site_detail_url TEXT,
+      publisher_id INTEGER, publisher_name TEXT, publisher_site_detail_url TEXT,
+      publisher_key_order TEXT,
+      first_appeared_in_issue_id INTEGER, first_appeared_in_issue_name TEXT,
+      first_appeared_in_issue_issue_number TEXT, first_appeared_in_issue_key_order TEXT
     )
   `);
   conn.exec(`
@@ -354,6 +367,29 @@ function ensureJoinTables(conn, log) {
   conn.exec(`
     CREATE INDEX IF NOT EXISTS idx_person_credit_type
       ON cv_person_credit (credit_type, credit_id)
+  `);
+  // SRV-6b: the two story arc relationship collections (issues, movies)
+  // normalized into a single join table (the publisher pattern, SRV-6a — no
+  // count column, since the entries carry none). The live API never returns
+  // null for these (always an array — verified against the verbatim raw-API
+  // dump: issues null=0; movies is [] or absent, never null, and never
+  // populated), so no presence bitmask is needed: a story arc with no join
+  // rows emits [] for each.
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_storyarc_credit (
+      storyarc_id INTEGER NOT NULL,
+      credit_type TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      credit_id INTEGER,
+      name TEXT,
+      api_detail_url TEXT,
+      site_detail_url TEXT,
+      PRIMARY KEY (storyarc_id, credit_type, position)
+    )
+  `);
+  conn.exec(`
+    CREATE INDEX IF NOT EXISTS idx_storyarc_credit_type
+      ON cv_storyarc_credit (credit_type, credit_id)
   `);
 }
 
@@ -1066,6 +1102,151 @@ const MIGRATIONS = [
       } catch (e) {
         try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
         log(`  Warning: could not normalize person collections: ${e.message}`, { force: true });
+        return false;
+      }
+    }
+  },
+
+  // v10: SRV-6b — the four story arc JSON columns are normalized. The two
+  // relationship collections (issues, movies) move into the cv_storyarc_credit
+  // join table (the publisher pattern, SRV-6a). The live API never returns null
+  // for these (always an array — verified against the verbatim raw-API dump:
+  // issues null=0; movies is [] or absent, never null, and never populated), so
+  // no presence bitmask is needed: a story arc with no join rows emits [] for
+  // each. The two scalar refs (publisher, first_appeared_in_issue) move to
+  // inline id + display-field + key_order columns (byte-for-byte safe — the
+  // updater refreshes them in lockstep with the story arc row, so a LEFT JOIN
+  // would diverge if the referenced row were re-synced after a rename). The
+  // story arc publisher ref carries a site_detail_url the team's lacks, so it
+  // gets a fourth inline column.
+  //
+  // The collections are historical (the updater's field_list never requests
+  // them), so they are backfilled once and not refreshed by sync. It backfills
+  // the join table and the inline columns from the JSON columns and then drops
+  // those columns. It is a no-op when the JSON columns are already gone (final
+  // schema).
+  {
+    version: 10,
+    name: "SRV-6b story arc normalization",
+    up(conn, log) {
+      const arcCols = tableColumns(conn, "cv_storyarc");
+      const jsonCols = [
+        "publisher", "first_appeared_in_issue", "issues", "movies"
+      ].filter((c) => arcCols.includes(c));
+      // Nothing to migrate if the JSON columns are already gone (final schema) or
+      // the table is absent (a fresh database has the final schema, no JSON cols).
+      if (jsonCols.length === 0) return true;
+
+      // Add the eight inline scalar-ref columns (absent on pre-v10 databases; a
+      // fresh database has them from the CREATE but no JSON columns, so it
+      // returned above). The ALTERs are idempotent-guarded by the column check.
+      const inlineColumns = [
+        ["publisher_id", "INTEGER"],
+        ["publisher_name", "TEXT"],
+        ["publisher_site_detail_url", "TEXT"],
+        ["publisher_key_order", "TEXT"],
+        ["first_appeared_in_issue_id", "INTEGER"],
+        ["first_appeared_in_issue_name", "TEXT"],
+        ["first_appeared_in_issue_issue_number", "TEXT"],
+        ["first_appeared_in_issue_key_order", "TEXT"]
+      ];
+      for (const [col, type] of inlineColumns) {
+        if (!arcCols.includes(col)) {
+          conn.exec(`ALTER TABLE cv_storyarc ADD COLUMN ${col} ${type}`);
+        }
+      }
+
+      log("  Normalizing story arcs into cv_storyarc_credit...");
+      try {
+        const creditTypes = { issues: "issue", movies: "movie" };
+        const creditTypeEntries = Object.entries(creditTypes).filter(([col]) => arcCols.includes(col));
+        const insertCredit = conn.prepare(
+          `INSERT OR REPLACE INTO cv_storyarc_credit
+             (storyarc_id, credit_type, position, credit_id, name, api_detail_url, site_detail_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        const deleteCredits = conn.prepare(
+          "DELETE FROM cv_storyarc_credit WHERE storyarc_id = ? AND credit_type = ?"
+        );
+        const updatePublisher = conn.prepare(
+          "UPDATE cv_storyarc SET publisher_id = ?, publisher_name = ?, " +
+          "publisher_site_detail_url = ?, publisher_key_order = ? WHERE id = ?"
+        );
+        const updateFirstAppeared = conn.prepare(
+          "UPDATE cv_storyarc SET first_appeared_in_issue_id = ?, first_appeared_in_issue_name = ?, " +
+          "first_appeared_in_issue_issue_number = ?, first_appeared_in_issue_key_order = ? WHERE id = ?"
+        );
+
+        // Process in id-ordered batches so memory stays bounded. The
+        // DELETE-then-INSERT per (story arc, type) makes the migration
+        // idempotent on re-run. One transaction per batch keeps the WAL bounded;
+        // a failure after a committed batch is safe because the migration is
+        // idempotent and the column drop runs only after every batch has
+        // committed.
+        const batchSize = 2000;
+        let minId = null;
+        let migrated = 0;
+        for (;;) {
+          const rows = conn.prepare(
+            `SELECT * FROM cv_storyarc WHERE id > ? ORDER BY id LIMIT ?`
+          ).all(minId ?? 0, batchSize);
+          if (rows.length === 0) break;
+
+          conn.exec("BEGIN");
+          for (const row of rows) {
+            for (const [col, type] of creditTypeEntries) {
+              const raw = row[col];
+              if (raw === null || raw === undefined) continue; // null: no rows
+              let entries;
+              try {
+                entries = JSON.parse(raw);
+              } catch {
+                continue;
+              }
+              if (!Array.isArray(entries)) continue;
+              deleteCredits.run(row.id, type);
+              entries.forEach((entry, position) => {
+                insertCredit.run(
+                  row.id, type, position,
+                  entry.id ?? null, entry.name ?? null,
+                  entry.api_detail_url ?? null, entry.site_detail_url ?? null
+                );
+              });
+            }
+            if (arcCols.includes("publisher")) {
+              const ref = extractScalarRef(row.publisher, false);
+              updatePublisher.run(
+                ref ? ref.id : null, ref ? ref.name : null,
+                ref ? ref.site_detail_url : null, ref ? ref.key_order : null, row.id
+              );
+            }
+            if (arcCols.includes("first_appeared_in_issue")) {
+              const ref = extractScalarRef(row.first_appeared_in_issue, true);
+              updateFirstAppeared.run(
+                ref ? ref.id : null, ref ? ref.name : null,
+                ref ? ref.issue_number : null, ref ? ref.key_order : null, row.id
+              );
+            }
+            migrated++;
+          }
+          conn.exec("COMMIT");
+
+          minId = rows[rows.length - 1].id;
+          log(`  Migrated ${migrated} story arcs...`);
+          if (rows.length < batchSize) break;
+        }
+
+        // Drop the now-redundant JSON columns to complete the normalization.
+        conn.exec("BEGIN");
+        for (const col of jsonCols) {
+          conn.exec(`ALTER TABLE cv_storyarc DROP COLUMN ${col}`);
+        }
+        conn.exec("COMMIT");
+        log(`  Normalized story arcs for ${migrated} story arcs.`);
+        return true;
+      } catch (e) {
+        try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
+        log(`  Warning: could not normalize story arcs: ${e.message}`, { force: true });
         return false;
       }
     }

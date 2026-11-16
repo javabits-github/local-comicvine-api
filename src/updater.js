@@ -1163,19 +1163,35 @@ class ComicVineUpdater {
 
         const countOfIssueAppearances =
           arc.count_of_isssue_appearances || arc.count_of_issue_appearances;
-        const firstAppeared = arc.first_appeared_in_issue
-          ? JSON.stringify(arc.first_appeared_in_issue)
-          : null;
+        // SRV-6b: the two scalar refs are stored as inline id + display fields +
+        // key_order (the JSON columns are dropped by the v10 migration). The
+        // key_order is the ref's exact key order so the server can re-emit the
+        // object byte-for-byte; api_detail_url is derived from the id on output
+        // (not stored). A null/absent ref stores NULLs. The story arc publisher
+        // ref carries a site_detail_url the team's lacks, so it gets a fourth
+        // inline column.
+        const publisher = arc.publisher;
+        const publisherId = publisher && publisher.id != null ? publisher.id : null;
+        const publisherName = publisher ? (publisher.name ?? null) : null;
+        const publisherSiteDetailUrl = publisher ? (publisher.site_detail_url ?? null) : null;
+        const publisherKeyOrder = publisher ? JSON.stringify(Object.keys(publisher)) : null;
+        const firstAppeared = arc.first_appeared_in_issue;
+        const faiId = firstAppeared && firstAppeared.id != null ? firstAppeared.id : null;
+        const faiName = firstAppeared ? (firstAppeared.name ?? null) : null;
+        const faiIssueNumber = firstAppeared ? (firstAppeared.issue_number ?? null) : null;
+        const faiKeyOrder = firstAppeared ? JSON.stringify(Object.keys(firstAppeared)) : null;
 
         this.conn.prepare(`
           INSERT INTO cv_storyarc
-            (id, name, publisher, aliases, count_of_issue_appearances,
+            (id, name, aliases, count_of_issue_appearances,
              deck, description, date_added, date_last_updated,
-             image_url, site_detail_url, first_appeared_in_issue)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             image_url, site_detail_url,
+             publisher_id, publisher_name, publisher_site_detail_url, publisher_key_order,
+             first_appeared_in_issue_id, first_appeared_in_issue_name,
+             first_appeared_in_issue_issue_number, first_appeared_in_issue_key_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
-            publisher = excluded.publisher,
             aliases = excluded.aliases,
             count_of_issue_appearances = excluded.count_of_issue_appearances,
             deck = excluded.deck,
@@ -1184,14 +1200,23 @@ class ComicVineUpdater {
             date_last_updated = excluded.date_last_updated,
             image_url = excluded.image_url,
             site_detail_url = excluded.site_detail_url,
-            first_appeared_in_issue = COALESCE(excluded.first_appeared_in_issue, cv_storyarc.first_appeared_in_issue)
+            publisher_id = excluded.publisher_id,
+            publisher_name = excluded.publisher_name,
+            publisher_site_detail_url = excluded.publisher_site_detail_url,
+            publisher_key_order = excluded.publisher_key_order,
+            first_appeared_in_issue_id = COALESCE(excluded.first_appeared_in_issue_id, cv_storyarc.first_appeared_in_issue_id),
+            first_appeared_in_issue_name = COALESCE(excluded.first_appeared_in_issue_name, cv_storyarc.first_appeared_in_issue_name),
+            first_appeared_in_issue_issue_number = COALESCE(excluded.first_appeared_in_issue_issue_number, cv_storyarc.first_appeared_in_issue_issue_number),
+            first_appeared_in_issue_key_order = COALESCE(excluded.first_appeared_in_issue_key_order, cv_storyarc.first_appeared_in_issue_key_order)
         `).run(
-          arcId, jsonify(arc.name), jsonify(arc.publisher),
+          arcId, jsonify(arc.name),
           jsonify(arc.aliases),
           jsonify(countOfIssueAppearances),
           jsonify(arc.deck), jsonify(arc.description),
           jsonify(arc.date_added), jsonify(arc.date_last_updated),
-          imageUrl, arc.site_detail_url, firstAppeared
+          imageUrl, arc.site_detail_url,
+          publisherId, publisherName, publisherSiteDetailUrl, publisherKeyOrder,
+          faiId, faiName, faiIssueNumber, faiKeyOrder
         );
 
         if (exists) this.stats.storyarcs_updated++;

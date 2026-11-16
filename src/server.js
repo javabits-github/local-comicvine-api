@@ -530,6 +530,84 @@ function buildPersonResult(row, database) {
   return result;
 }
 
+// SRV-6b: the two story arc relationship collections, in the order the live API
+// emits them. credit_type in cv_storyarc_credit maps to the field name.
+const STORYARC_CREDIT_FIELDS = {
+  issue: "issues",
+  movie: "movies"
+};
+
+// Rebuild a story arc credit entry with the exact key order the stored JSON used
+// (id, name, api_detail_url, site_detail_url) — id-first, like the other credits.
+function storyarcCreditRowToObject(row) {
+  return {
+    id: row.credit_id,
+    name: row.name,
+    api_detail_url: row.api_detail_url,
+    site_detail_url: row.site_detail_url
+  };
+}
+
+// SRV-6b: rebuild a story arc scalar ref (publisher / first_appeared_in_issue)
+// from the inline id + display-field + key_order columns, honoring the stored key
+// order so the two historical variants (api_detail_url-first vs id-first)
+// serialize byte-for-byte. The display fields (name / site_detail_url /
+// issue_number) are stored inline (byte-for-byte safe — the updater refreshes
+// them in lockstep with the story arc row, so a LEFT JOIN would diverge if the
+// referenced row were re-synced after a rename). api_detail_url is derived from
+// the id (the ref's own resource type: publisher/4010, first_appeared_in_issue/4000).
+// A null id emits null (the live API does).
+function buildStoryArcScalarRef(row, prefix) {
+  const id = row[`${prefix}_id`];
+  if (id === null || id === undefined) return null;
+  const values = {
+    id,
+    name: row[`${prefix}_name`] ?? null,
+    ...(prefix === "publisher"
+      ? { site_detail_url: row[`${prefix}_site_detail_url`] ?? null }
+      : { issue_number: row[`${prefix}_issue_number`] ?? null }),
+    api_detail_url: buildApiDetailUrl(prefix, id)
+  };
+  let keys = Object.keys(values);
+  if (row[`${prefix}_key_order`]) {
+    try { keys = JSON.parse(row[`${prefix}_key_order`]); } catch { /* keep the default order */ }
+  }
+  const result = {};
+  for (const key of keys) {
+    if (key in values) result[key] = values[key];
+  }
+  return result;
+}
+
+// SRV-6b: generate the story arc collections from the cv_storyarc_credit join
+// table and the two scalar refs from the inline columns (the v10 migration
+// backfilled both from the legacy JSON columns). The live API never returns null
+// for the collections (always an array — issues null=0; movies is [] or absent,
+// never null, and never populated), so a story arc with no join rows emits []
+// for each (the accepted null→[] divergence for the Node-updater null rows).
+// Used only when the join table exists; buildResult's JSON-column path covers
+// pre-SRV-6b databases and test fixtures without it.
+function buildStoryArcResult(row, database) {
+  const result = buildResult(row, "story_arc");
+
+  // The two scalar refs from the inline columns (byte-for-byte safe).
+  result.publisher = buildStoryArcScalarRef(row, "publisher");
+  result.first_appeared_in_issue = buildStoryArcScalarRef(row, "first_appeared_in_issue");
+
+  const creditRows = database
+    .prepare("SELECT * FROM cv_storyarc_credit WHERE storyarc_id = ? ORDER BY credit_type, position")
+    .all(row.id);
+  const creditsByType = {};
+  for (const credit of creditRows) {
+    (creditsByType[credit.credit_type] ??= []).push(credit);
+  }
+  for (const [type, field] of Object.entries(STORYARC_CREDIT_FIELDS)) {
+    result[field] = (creditsByType[type] ?? []).map(storyarcCreditRowToObject);
+  }
+
+  return result;
+}
+
 function buildResult(row, singular) {
   const has = (name) => Object.hasOwn(row, name);
   if (singular === "volume") {
@@ -944,6 +1022,17 @@ function buildResourceConfig(database, resource) {
   // collections, so a team with no join rows emits [] for each.
   if (singular === "team" && !has("character_enemies") && tableColumns(database, "cv_team_credit").size > 0) {
     build = (row) => buildTeamResult(row, database);
+  }
+  // SRV-6b: generate the story arc collections from the cv_storyarc_credit join
+  // table and the two scalar refs from the inline columns once the v10 migration
+  // has dropped the legacy JSON columns. The publisher column is the completion
+  // marker — it is dropped in the same transaction as the other three, so its
+  // absence means the migration completed (a rolled-back migration keeps it).
+  // Otherwise buildResult reads the legacy JSON columns (pre-SRV-6b databases and
+  // test fixtures without the join table). The live API is never null for the
+  // collections, so a story arc with no join rows emits [] for each.
+  if (singular === "story_arc" && !has("publisher") && tableColumns(database, "cv_storyarc_credit").size > 0) {
+    build = (row) => buildStoryArcResult(row, database);
   }
   } else if (singular === "issue") {
   alias = "i";
