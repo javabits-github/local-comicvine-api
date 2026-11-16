@@ -85,7 +85,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     const version = migrate(conn, makeLog());
     conn.close();
     assert.equal(version, SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 11);
+    assert.equal(SCHEMA_VERSION, 12);
 
     const db = new DatabaseSync(dbPath);
     const tables = tableNames(db);
@@ -98,7 +98,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // The join tables.
-    for (const t of ["cv_volume_credit", "cv_volume_issue_ref", "cv_concept_credit", "cv_publisher_credit", "cv_team_credit", "cv_person_credit", "cv_storyarc_credit", "cv_object_credit"]) {
+    for (const t of ["cv_volume_credit", "cv_volume_issue_ref", "cv_concept_credit", "cv_publisher_credit", "cv_team_credit", "cv_person_credit", "cv_storyarc_credit", "cv_object_credit", "cv_issue_credit", "cv_issue_image"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // FTS indexes for the seven created resource tables (the four legacy base
@@ -143,7 +143,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     // The seven newer endpoints are seeded at the raw-dump snapshot date.
     const endpoints = db.prepare("SELECT endpoint FROM cv_sync_metadata ORDER BY endpoint").all().map((r) => r.endpoint);
     assert.deepEqual(endpoints, ["characters", "concepts", "locations", "objects", "powers", "storyarcs", "teams"]);
-    assert.equal(readSchemaVersion(db), 11);
+    assert.equal(readSchemaVersion(db), 12);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -158,7 +158,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
     const conn = new DatabaseSync(dbPath);
     const version = migrate(conn, makeLog());
     conn.close();
-    assert.equal(version, 11);
+    assert.equal(version, 12);
 
     const db = new DatabaseSync(dbPath);
     // v1: resume_state added.
@@ -202,7 +202,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
       pubCredit.map((r) => [r.credit_type, r.credit_id, r.name]),
       [["character", 1, "A Character"], ["volume", 2, "A Volume"]]
     );
-    assert.equal(readSchemaVersion(db), 11);
+    assert.equal(readSchemaVersion(db), 12);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -219,7 +219,7 @@ test("migrate() is a no-op on an already-migrated database (stamp at final)", ()
     const log = makeLog();
     const version = migrate(conn, log); // second run: nothing to do
     conn.close();
-    assert.equal(version, 11);
+    assert.equal(version, 12);
     assert.ok(!log.lines.some((l) => l.includes("Applying migration")),
       `no migrations should run, got: ${log.lines.join(" | ")}`);
   } finally {
@@ -240,9 +240,9 @@ test("a partially-migrated database (stamp 2) runs only the newer migrations", (
     const log = makeLog();
     const version = migrate(conn, log);
     conn.close();
-    assert.equal(version, 11);
+    assert.equal(version, 12);
     const applied = log.lines.filter((l) => l.includes("Applying migration")).map((l) => l.match(/v(\d+)/)[1]);
-    assert.deepEqual(applied, ["3", "4", "5", "6", "7", "8", "9", "10", "11"]);
+    assert.deepEqual(applied, ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]);
   } finally {
     cleanupTempDir(dir);
   }
@@ -255,9 +255,9 @@ test("the CLI migrates a database with --db and reports the version", () => {
   try {
     const result = spawnSync(process.execPath, [path.join(__dirname, "..", "src", "migrate.js"), "--db", dbPath], { encoding: "utf8" });
     assert.equal(result.status, 0, `stderr: ${result.stderr}`);
-    assert.ok(result.stdout.includes("Schema version: 11"), result.stdout);
+    assert.ok(result.stdout.includes("Schema version: 12"), result.stdout);
     const db = new DatabaseSync(dbPath);
-    assert.equal(readSchemaVersion(db), 11);
+    assert.equal(readSchemaVersion(db), 12);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -278,9 +278,9 @@ test("the CLI rejects a missing database", () => {
 // ─── Module shape ─────────────────────────────────────────────────────────────
 
 test("MIGRATIONS is an ordered, versioned list", () => {
-  assert.equal(MIGRATIONS.length, 11);
+  assert.equal(MIGRATIONS.length, 12);
   const versions = MIGRATIONS.map((m) => m.version);
-  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   for (const m of MIGRATIONS) {
     assert.equal(typeof m.up, "function");
     assert.equal(typeof m.name, "string");
@@ -630,6 +630,77 @@ test("v11 (SRV-6h) normalizes object collections into cv_object_credit and drops
     // Idempotent: a re-run is a no-op (the columns are already dropped).
     v11.up(db, makeLog());
     assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_object_credit WHERE object_id = 1").get().c, 2);
+    db.close();
+  } finally {
+    cleanupTempDir(dir);
+  }
+});
+
+// ─── v12 (SRV-6f) in isolation ───────────────────────────────────────────────
+
+test("v12 (SRV-6f) normalizes issue collections into cv_issue_credit/cv_issue_image and drops the JSON columns", () => {
+  const { dir, dbPath } = tempDb("srv6f.db");
+  try {
+    const conn = new DatabaseSync(dbPath);
+    conn.exec(`
+      CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, name TEXT,
+        character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT,
+        story_arc_credits TEXT, associated_images TEXT, object_credits TEXT, concept_credits TEXT,
+        character_died_in TEXT, team_disbanded_in TEXT,
+        first_appearance_characters TEXT, first_appearance_concepts TEXT, first_appearance_locations TEXT,
+        first_appearance_objects TEXT, first_appearance_storyarcs TEXT, first_appearance_teams TEXT);
+      CREATE TABLE cv_issue_credit (issue_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, role TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (issue_id, credit_type, position));
+      CREATE TABLE cv_issue_image (issue_id INTEGER NOT NULL, position INTEGER NOT NULL, image_id INTEGER, caption TEXT, image_tags TEXT, original_url TEXT, PRIMARY KEY (issue_id, position));
+    `);
+    const cols = ["character_credits", "person_credits", "team_credits", "location_credits", "story_arc_credits", "associated_images", "object_credits", "concept_credits", "character_died_in", "team_disbanded_in", "first_appearance_characters", "first_appearance_concepts", "first_appearance_locations", "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"];
+    const insert = conn.prepare(`INSERT INTO cv_issue (id, name, ${cols.join(", ")}) VALUES (?, ?, ${cols.map(() => "?").join(", ")})`);
+    // Row 1: character + person credits populated (person carries a role),
+    // associated_images populated; the four nullable collections are [] (bits
+    // set); the six first_appearance_* are null (bits cleared). Mask = 15.
+    insert.run(1, "Issue 1",
+      JSON.stringify([{ id: 1, name: "Hero", api_detail_url: "https://comicvine.gamespot.com/api/character/4001-1/", site_detail_url: "https://comicvine.gamespot.com/hero/" }]),
+      JSON.stringify([{ id: 2, name: "Jane", role: "Writer", api_detail_url: "https://comicvine.gamespot.com/api/person/4002-2/", site_detail_url: "https://comicvine.gamespot.com/jane/" }]),
+      "[]", "[]", "[]",
+      JSON.stringify([{ id: 3, caption: "A pic", image_tags: "tag", original_url: "https://comicvine.gamespot.com/img.png" }]),
+      "[]", "[]", "[]", "[]",
+      null, null, null, null, null, null);
+    // Row 2: all sixteen null (the UPD-7 window) → mask 0, no join rows.
+    insert.run(2, "Issue 2", ...cols.map(() => null));
+    // Row 3: all sixteen [] → mask 1023 (all ten bits set), no join rows.
+    insert.run(3, "Issue 3", ...cols.map(() => "[]"));
+    conn.close();
+
+    const db = new DatabaseSync(dbPath);
+    const v12 = MIGRATIONS.find((m) => m.version === 12);
+    v12.up(db, makeLog());
+
+    // The sixteen JSON columns are dropped; credits_presence is added.
+    const issueCols = columnNames(db, "cv_issue");
+    for (const c of cols) {
+      assert.ok(!issueCols.includes(c), `${c} should be dropped`);
+    }
+    assert.ok(issueCols.includes("credits_presence"), "credits_presence should be added");
+
+    // Row 1: one character + one person credit (person carries the role) + one image.
+    const credits1 = db.prepare("SELECT credit_type, credit_id, name, role FROM cv_issue_credit WHERE issue_id = 1 ORDER BY credit_type, position").all();
+    assert.deepEqual(credits1.map((r) => [r.credit_type, r.credit_id, r.name, r.role]),
+      [["character", 1, "Hero", null], ["person", 2, "Jane", "Writer"]]);
+    const image1 = db.prepare("SELECT image_id, caption, image_tags, original_url FROM cv_issue_image WHERE issue_id = 1").get();
+    assert.deepEqual([image1.image_id, image1.caption, image1.image_tags, image1.original_url], [3, "A pic", "tag", "https://comicvine.gamespot.com/img.png"]);
+    // The four [] nullable collections set bits 0-3; the six null first_appearance_*
+    // clear bits 4-9. So the mask is 15.
+    assert.equal(db.prepare("SELECT credits_presence FROM cv_issue WHERE id = 1").get().credits_presence, 15);
+    // Row 2: all null → mask 0, no join rows.
+    assert.equal(db.prepare("SELECT credits_presence FROM cv_issue WHERE id = 2").get().credits_presence, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_issue_credit WHERE issue_id = 2").get().c, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_issue_image WHERE issue_id = 2").get().c, 0);
+    // Row 3: all [] → mask 1023 (all ten bits set), no join rows.
+    assert.equal(db.prepare("SELECT credits_presence FROM cv_issue WHERE id = 3").get().credits_presence, 1023);
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_issue_credit WHERE issue_id = 3").get().c, 0);
+
+    // Idempotent: a re-run is a no-op (the columns are already dropped).
+    v12.up(db, makeLog());
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_issue_credit WHERE issue_id = 1").get().c, 2);
     db.close();
   } finally {
     cleanupTempDir(dir);

@@ -654,6 +654,113 @@ function buildObjectResult(row, database) {
   return result;
 }
 
+// SRV-6f: the fifteen issue relationship collections that are arrays of
+// {id, name, [role], api_detail_url, site_detail_url} refs, in a fixed order.
+// credit_type in cv_issue_credit maps to the live output field name.
+const ISSUE_CREDIT_TYPES = [
+  "character", "person", "team", "location", "story_arc", "object", "concept",
+  "character_died_in", "team_disbanded_in",
+  "first_appearance_character", "first_appearance_concept", "first_appearance_location",
+  "first_appearance_object", "first_appearance_story_arc", "first_appearance_team"
+];
+const ISSUE_CREDIT_FIELDS = {
+  character: "character_credits",
+  person: "person_credits",
+  team: "team_credits",
+  location: "location_credits",
+  story_arc: "story_arc_credits",
+  object: "object_credits",
+  concept: "concept_credits",
+  character_died_in: "character_died_in",
+  team_disbanded_in: "team_disbanded_in",
+  first_appearance_character: "first_appearance_characters",
+  first_appearance_concept: "first_appearance_concepts",
+  first_appearance_location: "first_appearance_locations",
+  first_appearance_object: "first_appearance_objects",
+  first_appearance_story_arc: "first_appearance_storyarcs",
+  first_appearance_team: "first_appearance_teams"
+};
+// The ten collections that can be null (the 17,986 UPD-7-window rows are NULL for
+// these; the six first_appearance_* are always null on the live API yet 1,120,638
+// local rows store "[]" for them — the Python-updater `|| []` coercion, F9.3), in a
+// fixed order shared with the migration/updater. Bit i of cv_issue.credits_presence
+// marks whether that collection was a non-null array, so the server distinguishes
+// an empty [] from a null collection (the SRV-6c volume pattern).
+const ISSUE_NULLABLE_CREDIT_TYPES = [
+  "object", "concept", "character_died_in", "team_disbanded_in",
+  "first_appearance_character", "first_appearance_concept", "first_appearance_location",
+  "first_appearance_object", "first_appearance_story_arc", "first_appearance_team"
+];
+
+// Rebuild an issue credit entry with the exact key order the stored JSON used.
+// person credits carry a role (always present, even when null); the other types do
+// not. The key order is id, name, [role], api_detail_url, site_detail_url.
+function issueCreditRowToObject(row) {
+  if (row.credit_type === "person") {
+    return {
+      id: row.credit_id,
+      name: row.name,
+      role: row.role,
+      api_detail_url: row.api_detail_url,
+      site_detail_url: row.site_detail_url
+    };
+  }
+  return {
+    id: row.credit_id,
+    name: row.name,
+    api_detail_url: row.api_detail_url,
+    site_detail_url: row.site_detail_url
+  };
+}
+
+// Rebuild an associated_images entry with the exact key order the stored JSON used
+// (id, caption, image_tags, original_url).
+function issueImageRowToObject(row) {
+  return {
+    id: row.image_id,
+    caption: row.caption,
+    image_tags: row.image_tags,
+    original_url: row.original_url
+  };
+}
+
+// SRV-6f: generate the issue collections from the cv_issue_credit / cv_issue_image
+// join tables (the v12 migration backfilled them from the legacy JSON columns). The
+// ten nullable collections use the credits_presence bitmask to distinguish an empty
+// [] from a null; the other six (never null) emit [] when they have no rows. Used
+// only when the join tables exist; buildResult's JSON-column path covers pre-SRV-6f
+// databases and test fixtures without them.
+function buildIssueResult(row, database) {
+  const result = buildResult(row, "issue");
+
+  const creditRows = database
+    .prepare("SELECT * FROM cv_issue_credit WHERE issue_id = ? ORDER BY credit_type, position")
+    .all(row.id);
+  const creditsByType = {};
+  for (const credit of creditRows) {
+    (creditsByType[credit.credit_type] ??= []).push(credit);
+  }
+  const mask = row.credits_presence ?? 0;
+  for (const type of ISSUE_CREDIT_TYPES) {
+    const field = ISSUE_CREDIT_FIELDS[type];
+    const nullableIndex = ISSUE_NULLABLE_CREDIT_TYPES.indexOf(type);
+    if (nullableIndex >= 0) {
+      result[field] = mask & (1 << nullableIndex)
+        ? (creditsByType[type] ?? []).map(issueCreditRowToObject)
+        : null;
+    } else {
+      result[field] = (creditsByType[type] ?? []).map(issueCreditRowToObject);
+    }
+  }
+  // associated_images is never null (always [] or populated), so no rows -> [].
+  const imageRows = database
+    .prepare("SELECT * FROM cv_issue_image WHERE issue_id = ? ORDER BY position")
+    .all(row.id);
+  result.associated_images = imageRows.map(issueImageRowToObject);
+
+  return result;
+}
+
 function buildResult(row, singular) {
   const has = (name) => Object.hasOwn(row, name);
   if (singular === "volume") {
@@ -1087,6 +1194,15 @@ function buildResourceConfig(database, resource) {
   // (the stored cv_volume.api_detail_url column is dropped), so it is not selected.
   const volumeSite = volumeColumns.has("site_detail_url") ? "v.site_detail_url AS volume_site_detail_url" : "NULL AS volume_site_detail_url";
   selectExtra = `i.*, ${volumeColumns.has("name") ? "v.name AS volume_name" : "NULL AS volume_name"}, ${volumeSite}`;
+  // SRV-6f: generate the issue collections from the cv_issue_credit / cv_issue_image
+  // join tables once the v12 migration has dropped the legacy JSON columns. The
+  // character_credits column is the completion marker — it is dropped in the same
+  // transaction as the other fifteen, so its absence means the migration completed
+  // (a rolled-back migration keeps it). Otherwise buildResult reads the legacy JSON
+  // columns (pre-SRV-6f databases and test fixtures without the join tables).
+  if (singular === "issue" && !has("character_credits") && tableColumns(database, "cv_issue_credit").size > 0 && tableColumns(database, "cv_issue_image").size > 0) {
+    build = (row) => buildIssueResult(row, database);
+  }
   } else {
   alias = "p";
   from = `${resource.table} ${alias}`;

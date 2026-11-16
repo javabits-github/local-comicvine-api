@@ -418,6 +418,46 @@ function ensureJoinTables(conn, log) {
     CREATE INDEX IF NOT EXISTS idx_object_credit_type
       ON cv_object_credit (credit_type, credit_id)
   `);
+  // SRV-6f: the fifteen issue relationship collections that are arrays of
+  // {id, name, [role], api_detail_url, site_detail_url} refs — the seven credits
+  // (character/person/team/location/story_arc/object/concept), character_died_in,
+  // team_disbanded_in, and the six first_appearance_* — normalized into a single
+  // join table. `role` is only populated for person credits (the other types carry
+  // none). The six first_appearance_* are never populated on the live API (always
+  // null), so they never have join rows; their null-vs-[] distinction is carried
+  // by the cv_issue.credits_presence bitmask (the SRV-6c volume pattern).
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_issue_credit (
+      issue_id INTEGER NOT NULL,
+      credit_type TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      credit_id INTEGER,
+      name TEXT,
+      role TEXT,
+      api_detail_url TEXT,
+      site_detail_url TEXT,
+      PRIMARY KEY (issue_id, credit_type, position)
+    )
+  `);
+  conn.exec(`
+    CREATE INDEX IF NOT EXISTS idx_issue_credit_type
+      ON cv_issue_credit (credit_type, credit_id)
+  `);
+  // SRV-6f: the associated_images collection has a different entry shape
+  // ({id, caption, image_tags, original_url} — no name/role/urls), so it gets its
+  // own join table. The live API never returns null for it (always [] or
+  // populated), so no presence bit is needed: an issue with no rows emits [].
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_issue_image (
+      issue_id INTEGER NOT NULL,
+      position INTEGER NOT NULL,
+      image_id INTEGER,
+      caption TEXT,
+      image_tags TEXT,
+      original_url TEXT,
+      PRIMARY KEY (issue_id, position)
+    )
+  `);
 }
 
 // SRV-5: FTS5 full-text search indexes (final schema, not a migration). The
@@ -1379,6 +1419,185 @@ const MIGRATIONS = [
       } catch (e) {
         try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
         log(`  Warning: could not normalize objects: ${e.message}`, { force: true });
+        return false;
+      }
+    }
+  },
+
+  // v12: SRV-6f — the sixteen issue JSON collections are normalized. The fifteen
+  // that are arrays of {id, name, [role], api_detail_url, site_detail_url} refs
+  // (the seven credits, character_died_in, team_disbanded_in, and the six
+  // first_appearance_*) move into the cv_issue_credit join table; associated_images
+  // (a different entry shape: {id, caption, image_tags, original_url}) moves into
+  // cv_issue_image.
+  //
+  // A cv_issue.credits_presence bitmask (the SRV-6c volume pattern) carries the
+  // null-vs-[] distinction for the ten collections that can be null (object,
+  // concept, character_died_in, team_disbanded_in, and the six first_appearance_*):
+  // bit i is set when that collection was a non-null array. The six first_appearance_*
+  // are never populated on the live API (always null), yet 1,120,638 local rows store
+  // "[]" for them (the Python-updater `|| []` coercion, F9.3) while 17,986 store NULL
+  // (the UPD-7 window) — the bitmask preserves both so the output is byte-for-byte.
+  // The other six collections (character/person/team/location/story_arc credits and
+  // associated_images) are never null, so they emit [] when they have no rows.
+  //
+  // It backfills the join tables + bitmask from the JSON columns and then drops those
+  // columns. It is a no-op when the JSON columns are already gone (final schema) or
+  // the table is absent (cv_issue is Python-updater heritage, never created here; a
+  // fresh database has no cv_issue, so this is a no-op there).
+  {
+    version: 12,
+    name: "SRV-6f issue normalization",
+    up(conn, log) {
+      const issueCols = tableColumns(conn, "cv_issue");
+      // credit_type -> JSON column, for the fifteen cv_issue_credit collections.
+      const creditCols = {
+        character: "character_credits",
+        person: "person_credits",
+        team: "team_credits",
+        location: "location_credits",
+        story_arc: "story_arc_credits",
+        object: "object_credits",
+        concept: "concept_credits",
+        character_died_in: "character_died_in",
+        team_disbanded_in: "team_disbanded_in",
+        first_appearance_character: "first_appearance_characters",
+        first_appearance_concept: "first_appearance_concepts",
+        first_appearance_location: "first_appearance_locations",
+        first_appearance_object: "first_appearance_objects",
+        first_appearance_story_arc: "first_appearance_storyarcs",
+        first_appearance_team: "first_appearance_teams"
+      };
+      const presentCredit = Object.entries(creditCols).filter(([type, col]) => issueCols.includes(col));
+      const hasImages = issueCols.includes("associated_images");
+      // Nothing to migrate if the JSON columns are already gone (final schema) or
+      // the table is absent (a fresh database has no cv_issue).
+      if (presentCredit.length === 0 && !hasImages) return true;
+
+      // Add the presence bitmask column (idempotent).
+      if (!issueCols.includes("credits_presence")) {
+        log("  Adding credits_presence column to cv_issue...");
+        try {
+          conn.exec("ALTER TABLE cv_issue ADD COLUMN credits_presence INTEGER");
+        } catch (e) {
+          log(`  Warning: could not add credits_presence: ${e.message}`, { force: true });
+        }
+      }
+
+      // The ten collections that can be null, in a fixed order shared with the
+      // server/updater. Bit i of credits_presence marks whether that collection
+      // was a non-null array (so the server distinguishes [] from null).
+      const nullable = [
+        "object", "concept", "character_died_in", "team_disbanded_in",
+        "first_appearance_character", "first_appearance_concept", "first_appearance_location",
+        "first_appearance_object", "first_appearance_story_arc", "first_appearance_team"
+      ].filter((type) => issueCols.includes(creditCols[type]));
+
+      log("  Normalizing issues into cv_issue_credit / cv_issue_image...");
+      try {
+        const insertCredit = conn.prepare(
+          `INSERT OR REPLACE INTO cv_issue_credit
+             (issue_id, credit_type, position, credit_id, name, role, api_detail_url, site_detail_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        const deleteCredit = conn.prepare(
+          "DELETE FROM cv_issue_credit WHERE issue_id = ? AND credit_type = ?"
+        );
+        const insertImage = conn.prepare(
+          `INSERT OR REPLACE INTO cv_issue_image
+             (issue_id, position, image_id, caption, image_tags, original_url)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        );
+        const deleteImage = conn.prepare("DELETE FROM cv_issue_image WHERE issue_id = ?");
+        const setMask = conn.prepare("UPDATE cv_issue SET credits_presence = ? WHERE id = ?");
+
+        // Process in id-ordered batches so memory stays bounded (the DB has ~1.1M
+        // issues and ~5.5M credit rows). The DELETE-then-INSERT per (issue, type)
+        // makes the migration idempotent on re-run. One transaction per batch keeps
+        // the WAL bounded; a failure after a committed batch is safe because the
+        // migration is idempotent and the column drop runs only after every batch
+        // has committed.
+        const batchSize = 2000;
+        let minId = null;
+        let migrated = 0;
+        for (;;) {
+          const rows = conn.prepare(
+            `SELECT * FROM cv_issue WHERE id > ? ORDER BY id LIMIT ?`
+          ).all(minId ?? 0, batchSize);
+          if (rows.length === 0) break;
+
+          conn.exec("BEGIN");
+          for (const row of rows) {
+            let mask = 0;
+            for (let i = 0; i < nullable.length; i++) {
+              const raw = row[creditCols[nullable[i]]];
+              if (raw !== null && raw !== undefined) mask |= 1 << i;
+            }
+            for (const [type, col] of presentCredit) {
+              const raw = row[col];
+              if (raw === null || raw === undefined) continue; // null: no rows
+              let entries;
+              try {
+                entries = JSON.parse(raw);
+              } catch {
+                continue;
+              }
+              if (!Array.isArray(entries)) continue;
+              deleteCredit.run(row.id, type);
+              entries.forEach((entry, position) => {
+                insertCredit.run(
+                  row.id, type, position,
+                  entry.id ?? null, entry.name ?? null, entry.role ?? null,
+                  entry.api_detail_url ?? null, entry.site_detail_url ?? null
+                );
+              });
+            }
+            if (hasImages) {
+              const raw = row.associated_images;
+              deleteImage.run(row.id);
+              if (raw !== null && raw !== undefined) {
+                let entries;
+                try {
+                  entries = JSON.parse(raw);
+                } catch {
+                  entries = null;
+                }
+                if (Array.isArray(entries)) {
+                  entries.forEach((entry, position) => {
+                    insertImage.run(
+                      row.id, position,
+                      entry.id ?? null, entry.caption ?? null,
+                      entry.image_tags ?? null, entry.original_url ?? null
+                    );
+                  });
+                }
+              }
+            }
+            setMask.run(mask, row.id);
+            migrated++;
+          }
+          conn.exec("COMMIT");
+
+          minId = rows[rows.length - 1].id;
+          log(`  Migrated ${migrated} issues...`);
+          if (rows.length < batchSize) break;
+        }
+
+        // Drop the now-redundant JSON columns to complete the normalization.
+        const dropNames = presentCredit.map(([, col]) => col);
+        if (hasImages) dropNames.push("associated_images");
+        if (dropNames.length > 0) {
+          conn.exec("BEGIN");
+          for (const col of dropNames) {
+            conn.exec(`ALTER TABLE cv_issue DROP COLUMN ${col}`);
+          }
+          conn.exec("COMMIT");
+        }
+        log(`  Normalized issues for ${migrated} issues.`);
+        return true;
+      } catch (e) {
+        try { conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
+        log(`  Warning: could not normalize issues: ${e.message}`, { force: true });
         return false;
       }
     }

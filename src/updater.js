@@ -841,12 +841,74 @@ class ComicVineUpdater {
     return null;
   }
 
+  // SRV-6f: the fifteen issue relationship collections that are arrays of
+  // {id, name, [role], api_detail_url, site_detail_url} refs, as [API field
+  // name, credit_type] pairs in a fixed order. The credit_type is the value
+  // stored in cv_issue_credit.credit_type (and the key of the server's
+  // ISSUE_CREDIT_FIELDS). `role` is only populated for person credits.
+  static ISSUE_CREDIT_FIELD_TYPES = [
+    ["character_credits", "character"],
+    ["person_credits", "person"],
+    ["team_credits", "team"],
+    ["location_credits", "location"],
+    ["story_arc_credits", "story_arc"],
+    ["object_credits", "object"],
+    ["concept_credits", "concept"],
+    ["character_died_in", "character_died_in"],
+    ["team_disbanded_in", "team_disbanded_in"],
+    ["first_appearance_characters", "first_appearance_character"],
+    ["first_appearance_concepts", "first_appearance_concept"],
+    ["first_appearance_locations", "first_appearance_location"],
+    ["first_appearance_objects", "first_appearance_object"],
+    ["first_appearance_storyarcs", "first_appearance_story_arc"],
+    ["first_appearance_teams", "first_appearance_team"]
+  ];
+
+  // SRV-6f: the ten collections that can be null, as API field names, in the
+  // fixed order shared with the v12 migration and the server. Bit i of
+  // cv_issue.credits_presence marks whether that collection was a non-null
+  // array in the live response (the SRV-6c volume pattern), so the server can
+  // distinguish an empty [] from a null collection.
+  static ISSUE_NULLABLE_CREDIT_FIELDS = [
+    "object_credits", "concept_credits", "character_died_in", "team_disbanded_in",
+    "first_appearance_characters", "first_appearance_concepts", "first_appearance_locations",
+    "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"
+  ];
+
+  // SRV-6f: does cv_issue still carry the legacy JSON collection columns? The
+  // v12 migration drops character_credits (and the other fifteen) once the
+  // backfill completes; while it is present (a partially-completed migration)
+  // the server reads the JSON path, so the updater writes the JSON columns too
+  // — keeping the output byte-for-byte and letting the next migration re-run
+  // re-backfill from the JSON the updater wrote (rather than wiping join rows
+  // from NULLed columns). The join tables exist because ensureJoinTables
+  // creates them in migrate (which runs before any sync).
+  issueUsesJoinTables() {
+    const cols = this.conn.prepare("PRAGMA table_info(cv_issue)").all().map((c) => c.name);
+    return !cols.includes("character_credits");
+  }
+
   // Upsert a single issue. Returns true on success, false if the INSERT
   // fails (typically a foreign-key constraint, e.g. a missing volume). The FK
   // failure is surfaced via runWithFkDiagnostics (which logs the failing
   // row/SQL and records it in sync_errors) and then swallowed here so the
   // caller can attempt recovery.
-  upsertIssue(issueId, issueData, volumeId) {
+  //
+  // SRV-6f: routes by the database schema, mirroring the server's dispatch.
+  // `useJoinTables` overrides the detection when the caller has already checked
+  // the schema (syncIssues checks once and passes it for every issue in the
+  // run); when omitted it is derived from the current cv_issue columns.
+  upsertIssue(issueId, issueData, volumeId, useJoinTables) {
+    if (useJoinTables === undefined) useJoinTables = this.issueUsesJoinTables();
+    if (useJoinTables) return this.upsertIssueJoin(issueId, issueData, volumeId);
+    return this.upsertIssueJson(issueId, issueData, volumeId);
+  }
+
+  // SRV-6f: the legacy path — the pre-normalization schema with the sixteen
+  // JSON collection columns (a partially-completed v12 migration). Writes
+  // exactly what the pre-SRV-6f updater wrote, so the server's JSON path keeps
+  // serving byte-for-byte output while the migration is incomplete.
+  upsertIssueJson(issueId, issueData, volumeId) {
     const issueSql = `
       INSERT OR REPLACE INTO cv_issue
         (id, volume_id, name, issue_number, cover_date, store_date,
@@ -898,6 +960,108 @@ class ComicVineUpdater {
       this.runWithFkDiagnostics("cv_issue", issueSql, params, `issue ${issueId} (${issueData.name})`);
       return true;
     } catch (e) {
+      this.log(`    ✗ Failed to upsert issue ${issueId}: ${e.message}`);
+      return false;
+    }
+  }
+
+  // SRV-6f: the final path — the v12 migration has dropped the sixteen JSON
+  // collection columns. The fifteen {id, name, [role], api_detail_url,
+  // site_detail_url} ref collections (the seven credits, character_died_in,
+  // team_disbanded_in, and the six first_appearance_*) go into cv_issue_credit;
+  // associated_images (a different shape: {id, caption, image_tags,
+  // original_url}) goes into cv_issue_image. The credits_presence bitmask
+  // carries the null-vs-[] distinction for the ten collections that can be
+  // null: bit i is set when that collection was a non-null array in the live
+  // response. The six first_appearance_* are always null on the live API, so
+  // re-syncing clears their bits — fixing the 1,120,638 `"[]"` artifacts
+  // (F9.3) that the migration preserved for byte-for-byte parity.
+  //
+  // The upsert is an INSERT OR REPLACE (it resets the row, so credits_presence
+  // must be written on every upsert — a stale mask would otherwise survive).
+  // The whole upsert + join writes run in one transaction (the upsertConcept
+  // pattern) so a failure leaves no half-written issue.
+  upsertIssueJoin(issueId, issueData, volumeId) {
+    const insertCredit = this.conn.prepare(`
+      INSERT OR REPLACE INTO cv_issue_credit
+        (issue_id, credit_type, position, credit_id, name, role, api_detail_url, site_detail_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const deleteCredits = this.conn.prepare(
+      "DELETE FROM cv_issue_credit WHERE issue_id = ? AND credit_type = ?"
+    );
+    const insertImage = this.conn.prepare(`
+      INSERT OR REPLACE INTO cv_issue_image
+        (issue_id, position, image_id, caption, image_tags, original_url)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const deleteImages = this.conn.prepare("DELETE FROM cv_issue_image WHERE issue_id = ?");
+
+    // The ten nullable collections, in the fixed order shared with the
+    // migration/server. Bit i is set when the live value is a non-null array.
+    let mask = 0;
+    for (let i = 0; i < ComicVineUpdater.ISSUE_NULLABLE_CREDIT_FIELDS.length; i++) {
+      const value = issueData[ComicVineUpdater.ISSUE_NULLABLE_CREDIT_FIELDS[i]];
+      if (value !== null && value !== undefined) mask |= 1 << i;
+    }
+
+    const issueSql = `
+      INSERT OR REPLACE INTO cv_issue
+        (id, volume_id, name, issue_number, cover_date, store_date,
+         description, image_url, site_detail_url,
+         aliases, deck, date_added, date_last_updated,
+         credits_presence, has_staff_review)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    const params = [
+      issueId, volumeId,
+      jsonify(issueData.name), jsonify(issueData.issue_number),
+      jsonify(issueData.cover_date), jsonify(issueData.store_date),
+      jsonify(issueData.description),
+      issueData.image ? issueData.image.original_url : null,
+      issueData.site_detail_url,
+      jsonify(issueData.aliases),
+      jsonify(issueData.deck), jsonify(issueData.date_added),
+      jsonify(issueData.date_last_updated),
+      mask,
+      jsonify(issueData.has_staff_review)
+    ];
+
+    try {
+      this.conn.exec("BEGIN");
+      this.runWithFkDiagnostics("cv_issue", issueSql, params, `issue ${issueId} (${issueData.name})`);
+
+      // The fifteen ref collections as join rows (live — the detail call
+      // returns them on every sync). A null/absent collection deletes the
+      // existing rows and inserts none (the server emits [] for the six
+      // never-null types, null for a cleared nullable bit).
+      for (const [field, type] of ComicVineUpdater.ISSUE_CREDIT_FIELD_TYPES) {
+        deleteCredits.run(issueId, type);
+        const entries = Array.isArray(issueData[field]) ? issueData[field] : [];
+        entries.forEach((entry, position) => {
+          insertCredit.run(
+            issueId, type, position,
+            entry.id ?? null, entry.name ?? null, entry.role ?? null,
+            entry.api_detail_url ?? null, entry.site_detail_url ?? null
+          );
+        });
+      }
+
+      // associated_images as join rows (never null on the live API).
+      deleteImages.run(issueId);
+      const images = Array.isArray(issueData.associated_images) ? issueData.associated_images : [];
+      images.forEach((entry, position) => {
+        insertImage.run(
+          issueId, position,
+          entry.id ?? null, entry.caption ?? null,
+          entry.image_tags ?? null, entry.original_url ?? null
+        );
+      });
+
+      this.conn.exec("COMMIT");
+      return true;
+    } catch (e) {
+      try { this.conn.exec("ROLLBACK"); } catch { /* not in a transaction */ }
       this.log(`    ✗ Failed to upsert issue ${issueId}: ${e.message}`);
       return false;
     }
@@ -969,6 +1133,11 @@ class ComicVineUpdater {
 
     // Fetch details for each issue
     this.log(`  Fetching details for ${remaining.length} issues...`);
+    // SRV-6f: route the upsert by schema once (the v12 migration drops the
+    // legacy JSON columns; while they're present the updater writes them). The
+    // schema is stable for the run (migrate ran first), so check it once and
+    // pass it to every upsert rather than re-checking per issue.
+    const useJoinTables = this.issueUsesJoinTables();
     for (let i = 0; i < remaining.length; i++) {
       const issueId = remaining[i];
       const issueData = await this.fetchIssueDetails(issueId);
@@ -982,7 +1151,7 @@ class ComicVineUpdater {
       // UPD-4: if the upsert fails on a foreign-key constraint (e.g. the
       // issue's volume isn't in the local DB yet), back-fill the missing
       // volume from the live API and retry the issue once.
-      let upserted = this.upsertIssue(issueId, issueData, volumeId);
+      let upserted = this.upsertIssue(issueId, issueData, volumeId, useJoinTables);
       if (!upserted && volumeId) {
         const volRow = this.conn.prepare("SELECT id FROM cv_volume WHERE id = ?").get(volumeId);
         if (!volRow) {
@@ -990,7 +1159,7 @@ class ComicVineUpdater {
           const volData = await this.fetchVolumeDetails(volumeId);
           if (volData) {
             this.upsertVolume(volData);
-            upserted = this.upsertIssue(issueId, issueData, volumeId);
+            upserted = this.upsertIssue(issueId, issueData, volumeId, useJoinTables);
             if (upserted) this.log(`    ✓ Recovered volume ${volumeId} and added issue ${issueId}`);
           } else {
             this.log(`    ✗ Could not fetch volume ${volumeId} from live API — skipping issue ${issueId}`);

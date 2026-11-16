@@ -263,6 +263,68 @@ test("builds volume first/last issue refs from the cv_issue join (SRV-6c)", asyn
   }
 });
 
+test("builds issue collections from the cv_issue_credit/cv_issue_image join (SRV-6f)", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-issue-join-test-"));
+  const joinDatabasePath = path.join(directory, "issue-join.db");
+  const joinDatabase = new DatabaseSync(joinDatabasePath);
+  joinDatabase.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, site_detail_url TEXT)");
+  // The final cv_issue schema: the sixteen JSON collection columns are dropped by
+  // the v12 migration; credits_presence carries the null-vs-[] distinction.
+  joinDatabase.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, aliases TEXT, deck TEXT, date_added TEXT, date_last_updated TEXT, credits_presence INTEGER, has_staff_review INTEGER)");
+  joinDatabase.exec("CREATE TABLE cv_issue_credit (issue_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, role TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (issue_id, credit_type, position))");
+  joinDatabase.exec("CREATE TABLE cv_issue_image (issue_id INTEGER NOT NULL, position INTEGER NOT NULL, image_id INTEGER, caption TEXT, image_tags TEXT, original_url TEXT, PRIMARY KEY (issue_id, position))");
+  joinDatabase.prepare("INSERT INTO cv_volume (id, name, site_detail_url) VALUES (?, ?, ?)").run(300, "Test Series", "https://example.test/series");
+  // Issue 4001: mask 1 (the object bit set, the other nine nullable bits clear).
+  // character + person credits populated (person carries a role); one image.
+  joinDatabase.prepare("INSERT INTO cv_issue (id, volume_id, name, issue_number, credits_presence) VALUES (?, ?, ?, ?, ?)").run(4001, 300, "Test Series #1", "1", 1);
+  joinDatabase.prepare("INSERT INTO cv_issue_credit (issue_id, credit_type, position, credit_id, name, role, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(4001, "character", 0, 1, "Hero", null, "https://comicvine.gamespot.com/api/character/4001-1/", "https://comicvine.gamespot.com/hero/");
+  joinDatabase.prepare("INSERT INTO cv_issue_credit (issue_id, credit_type, position, credit_id, name, role, api_detail_url, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(4001, "person", 0, 2, "Jane", "Writer", "https://comicvine.gamespot.com/api/person/4002-2/", "https://comicvine.gamespot.com/jane/");
+  joinDatabase.prepare("INSERT INTO cv_issue_image (issue_id, position, image_id, caption, image_tags, original_url) VALUES (?, ?, ?, ?, ?, ?)").run(4001, 0, 3, "A pic", "tag", "https://comicvine.gamespot.com/img.png");
+  // Issue 4002: mask 0 (all nullable bits clear); no join rows at all.
+  joinDatabase.prepare("INSERT INTO cv_issue (id, volume_id, name, issue_number, credits_presence) VALUES (?, ?, ?, ?, ?)").run(4002, 300, "Test Series #2", "2", 0);
+  joinDatabase.close();
+
+  const joinServer = createApiServer(joinDatabasePath, () => {});
+  await new Promise((resolve) => joinServer.listen(0, "127.0.0.1", resolve));
+  const joinUrl = `http://127.0.0.1:${joinServer.address().port}`;
+
+  try {
+    const detail = await (await fetch(`${joinUrl}/api/issue/4000-4001/`)).json();
+    const result = detail.results;
+    // The six never-null collections: [] when they have no rows, the array when populated.
+    assert.deepEqual(result.character_credits, [{ id: 1, name: "Hero", api_detail_url: "https://comicvine.gamespot.com/api/character/4001-1/", site_detail_url: "https://comicvine.gamespot.com/hero/" }]);
+    // person credits carry a role (the other types do not).
+    assert.deepEqual(result.person_credits, [{ id: 2, name: "Jane", role: "Writer", api_detail_url: "https://comicvine.gamespot.com/api/person/4002-2/", site_detail_url: "https://comicvine.gamespot.com/jane/" }]);
+    assert.deepEqual(result.team_credits, []);
+    assert.deepEqual(result.location_credits, []);
+    assert.deepEqual(result.story_arc_credits, []);
+    // The ten nullable collections: bit 0 (object) set → []; the rest clear → null.
+    assert.deepEqual(result.object_credits, []);
+    assert.equal(result.concept_credits, null);
+    assert.equal(result.character_died_in, null);
+    assert.equal(result.team_disbanded_in, null);
+    assert.equal(result.first_appearance_characters, null);
+    assert.equal(result.first_appearance_concepts, null);
+    assert.equal(result.first_appearance_locations, null);
+    assert.equal(result.first_appearance_objects, null);
+    assert.equal(result.first_appearance_storyarcs, null);
+    assert.equal(result.first_appearance_teams, null);
+    // associated_images is never null: the one image row.
+    assert.deepEqual(result.associated_images, [{ id: 3, caption: "A pic", image_tags: "tag", original_url: "https://comicvine.gamespot.com/img.png" }]);
+
+    // Issue 4002: mask 0 → all ten nullable collections null; the six never-null [].
+    const empty = await (await fetch(`${joinUrl}/api/issue/4000-4002/`)).json();
+    assert.deepEqual(empty.results.character_credits, []);
+    assert.deepEqual(empty.results.person_credits, []);
+    assert.deepEqual(empty.results.associated_images, []);
+    assert.equal(empty.results.object_credits, null);
+    assert.equal(empty.results.first_appearance_characters, null);
+  } finally {
+    await new Promise((resolve) => joinServer.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("emits volume credit collections under live names with numeric count and publisher URL (SRV-24)", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "comicvine-srv24-test-"));
   const dbPath = path.join(directory, "srv24.db");

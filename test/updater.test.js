@@ -21,6 +21,8 @@ before(() => {
     CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, issues TEXT, movies TEXT);
     CREATE TABLE cv_concept (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, api_detail_url TEXT, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, count_of_issue_appearances INTEGER, start_year TEXT);
     CREATE TABLE cv_sync_metadata (endpoint TEXT PRIMARY KEY, last_sync_date TEXT NOT NULL, last_sync_timestamp TEXT NOT NULL, resume_state TEXT);
+    CREATE TABLE cv_issue_credit (issue_id INTEGER NOT NULL, credit_type TEXT NOT NULL, position INTEGER NOT NULL, credit_id INTEGER, name TEXT, role TEXT, api_detail_url TEXT, site_detail_url TEXT, PRIMARY KEY (issue_id, credit_type, position));
+    CREATE TABLE cv_issue_image (issue_id INTEGER NOT NULL, position INTEGER NOT NULL, image_id INTEGER, caption TEXT, image_tags TEXT, original_url TEXT, PRIMARY KEY (issue_id, position));
   `);
   db.close();
 });
@@ -312,15 +314,22 @@ test("sync publishes, persons, volumes, issues, teams, and storyarcs via mock fe
   assert.equal(issues.length, 2);
   assert.equal(issues[0].volume_id, 300);
   assert.equal(issues[0].has_staff_review, 0);
-  const credits = JSON.parse(issues[0].character_credits);
-  assert.equal(credits[0].name, "Hero");
-  // UPD-8: the six first_appearance_* collections are null on the live API and
-  // must be stored as SQL NULL (not "[]"), so the server emits null, not [].
-  for (const c of ["first_appearance_characters", "first_appearance_concepts", "first_appearance_locations", "first_appearance_objects", "first_appearance_storyarcs", "first_appearance_teams"]) {
-    assert.equal(issues[0][c], null, `${c} should be stored as SQL NULL`);
-  }
-  // The never-null collections keep their "[]" / populated values.
-  assert.equal(issues[0].team_disbanded_in, "[]");
+  // SRV-6f: the sixteen JSON collection columns are dropped by the v12 migration
+  // (the collections now live in the cv_issue_credit / cv_issue_image join
+  // tables); the credits_presence bitmask carries the null-vs-[] distinction.
+  assert.ok(!("character_credits" in issues[0]), "character_credits column should be dropped");
+  assert.ok(!("first_appearance_characters" in issues[0]), "first_appearance_characters column should be dropped");
+  const charCredits = db.prepare("SELECT * FROM cv_issue_credit WHERE issue_id = ? AND credit_type = 'character' ORDER BY position").all(issues[0].id);
+  assert.equal(charCredits[0].name, "Hero");
+  const personCredits = db.prepare("SELECT * FROM cv_issue_credit WHERE issue_id = ? AND credit_type = 'person' ORDER BY position").all(issues[0].id);
+  assert.equal(personCredits[0].name, "Jane Doe");
+  assert.equal(personCredits[0].role, "Writer");
+  // The mock returns [] for the four nullable collections (object/concept/
+  // character_died_in/team_disbanded_in) → their bits are set; null for the six
+  // first_appearance_* → their bits are cleared. So the mask is 0b00001111 = 15.
+  assert.equal(issues[0].credits_presence, 15);
+  // The empty team_disbanded_in ([]) yields no join rows.
+  assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_issue_credit WHERE issue_id = ? AND credit_type = 'team_disbanded_in'").get(issues[0].id).c, 0);
 
   // Team
   const team = db.prepare("SELECT * FROM cv_team WHERE id=500").get();
