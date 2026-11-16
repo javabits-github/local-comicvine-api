@@ -182,7 +182,8 @@ function ensureResourceTables(conn, log) {
       publisher_id INTEGER, publisher_name TEXT, publisher_site_detail_url TEXT,
       publisher_key_order TEXT,
       first_appeared_in_issue_id INTEGER, first_appeared_in_issue_name TEXT,
-      first_appeared_in_issue_issue_number TEXT, first_appeared_in_issue_key_order TEXT
+      first_appeared_in_issue_issue_number TEXT, first_appeared_in_issue_key_order TEXT,
+      episodes TEXT, first_appeared_in_episode TEXT
     )
   `);
   conn.exec(`
@@ -1600,6 +1601,33 @@ const MIGRATIONS = [
         log(`  Warning: could not normalize issues: ${e.message}`, { force: true });
         return false;
       }
+    }
+  },
+
+  // v13: SRV-23/UPD-9 — the two story arc fields the live API emits but the
+  // updater never stored: `episodes` (a relationship collection, always an array
+  // — the live API never returns null) and `first_appeared_in_episode` (a scalar
+  // ref, mostly null). Both are stored as JSON-text columns (the pre-SRV-6
+  // denormalized pattern) rather than the SRV-6b join table / inline columns, so
+  // they work on both the legacy (JSON-column) and final (join-table) schemas and
+  // the server's buildResult path emits them on either. A fresh database has them
+  // from the CREATE above, so this is a no-op there; it adds the columns to
+  // existing databases (idempotent — guarded by the column check). The columns
+  // start NULL for existing rows; the updater populates them on the next sync and
+  // a one-time backfill (from the verbatim raw-API dump) fills the rest.
+  {
+    version: 13,
+    name: "SRV-23 story arc episodes + first_appeared_in_episode",
+    up(conn, log) {
+      const arcCols = tableColumns(conn, "cv_storyarc");
+      if (arcCols.length === 0) return true; // no cv_storyarc table (a fresh DB has it from the CREATE)
+      for (const [col, type] of [["episodes", "TEXT"], ["first_appeared_in_episode", "TEXT"]]) {
+        if (!arcCols.includes(col)) {
+          conn.exec(`ALTER TABLE cv_storyarc ADD COLUMN ${col} ${type}`);
+          log(`  Added cv_storyarc.${col}`);
+        }
+      }
+      return true;
     }
   }
 ];

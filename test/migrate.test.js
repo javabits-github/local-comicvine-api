@@ -85,7 +85,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     const version = migrate(conn, makeLog());
     conn.close();
     assert.equal(version, SCHEMA_VERSION);
-    assert.equal(SCHEMA_VERSION, 12);
+    assert.equal(SCHEMA_VERSION, 13);
 
     const db = new DatabaseSync(dbPath);
     const tables = tableNames(db);
@@ -127,7 +127,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     // SRV-6b: cv_storyarc is created on the final schema — the inline scalar-ref
     // columns are present and the four JSON columns are absent.
     const storyarcCols = columnNames(db, "cv_storyarc");
-    for (const c of ["publisher_id", "publisher_name", "publisher_site_detail_url", "publisher_key_order", "first_appeared_in_issue_id", "first_appeared_in_issue_name", "first_appeared_in_issue_issue_number", "first_appeared_in_issue_key_order"]) {
+    for (const c of ["publisher_id", "publisher_name", "publisher_site_detail_url", "publisher_key_order", "first_appeared_in_issue_id", "first_appeared_in_issue_name", "first_appeared_in_issue_issue_number", "first_appeared_in_issue_key_order", "episodes", "first_appeared_in_episode"]) {
       assert.ok(storyarcCols.includes(c), `expected ${c}`);
     }
     for (const c of ["publisher", "first_appeared_in_issue", "issues", "movies"]) {
@@ -143,7 +143,7 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     // The seven newer endpoints are seeded at the raw-dump snapshot date.
     const endpoints = db.prepare("SELECT endpoint FROM cv_sync_metadata ORDER BY endpoint").all().map((r) => r.endpoint);
     assert.deepEqual(endpoints, ["characters", "concepts", "locations", "objects", "powers", "storyarcs", "teams"]);
-    assert.equal(readSchemaVersion(db), 12);
+    assert.equal(readSchemaVersion(db), 13);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -158,7 +158,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
     const conn = new DatabaseSync(dbPath);
     const version = migrate(conn, makeLog());
     conn.close();
-    assert.equal(version, 12);
+    assert.equal(version, 13);
 
     const db = new DatabaseSync(dbPath);
     // v1: resume_state added.
@@ -202,7 +202,7 @@ test("migrate() upgrades a legacy database to the final schema", () => {
       pubCredit.map((r) => [r.credit_type, r.credit_id, r.name]),
       [["character", 1, "A Character"], ["volume", 2, "A Volume"]]
     );
-    assert.equal(readSchemaVersion(db), 12);
+    assert.equal(readSchemaVersion(db), 13);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -219,7 +219,7 @@ test("migrate() is a no-op on an already-migrated database (stamp at final)", ()
     const log = makeLog();
     const version = migrate(conn, log); // second run: nothing to do
     conn.close();
-    assert.equal(version, 12);
+    assert.equal(version, 13);
     assert.ok(!log.lines.some((l) => l.includes("Applying migration")),
       `no migrations should run, got: ${log.lines.join(" | ")}`);
   } finally {
@@ -240,9 +240,9 @@ test("a partially-migrated database (stamp 2) runs only the newer migrations", (
     const log = makeLog();
     const version = migrate(conn, log);
     conn.close();
-    assert.equal(version, 12);
+    assert.equal(version, 13);
     const applied = log.lines.filter((l) => l.includes("Applying migration")).map((l) => l.match(/v(\d+)/)[1]);
-    assert.deepEqual(applied, ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]);
+    assert.deepEqual(applied, ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]);
   } finally {
     cleanupTempDir(dir);
   }
@@ -255,9 +255,9 @@ test("the CLI migrates a database with --db and reports the version", () => {
   try {
     const result = spawnSync(process.execPath, [path.join(__dirname, "..", "src", "migrate.js"), "--db", dbPath], { encoding: "utf8" });
     assert.equal(result.status, 0, `stderr: ${result.stderr}`);
-    assert.ok(result.stdout.includes("Schema version: 12"), result.stdout);
+    assert.ok(result.stdout.includes("Schema version: 13"), result.stdout);
     const db = new DatabaseSync(dbPath);
-    assert.equal(readSchemaVersion(db), 12);
+    assert.equal(readSchemaVersion(db), 13);
     db.close();
   } finally {
     cleanupTempDir(dir);
@@ -278,9 +278,9 @@ test("the CLI rejects a missing database", () => {
 // ─── Module shape ─────────────────────────────────────────────────────────────
 
 test("MIGRATIONS is an ordered, versioned list", () => {
-  assert.equal(MIGRATIONS.length, 12);
+  assert.equal(MIGRATIONS.length, 13);
   const versions = MIGRATIONS.map((m) => m.version);
-  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   for (const m of MIGRATIONS) {
     assert.equal(typeof m.up, "function");
     assert.equal(typeof m.name, "string");

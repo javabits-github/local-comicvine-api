@@ -67,12 +67,18 @@ const teamRelationshipFields = new Set([
   "character_enemies", "character_friends", "characters", "disbanded_in_issues",
   "issue_credits", "isssues_disbanded_in", "movies", "story_arc_credits", "volume_credits"
 ]);
+// SRV-23: the allowlist uses the live API's key names — the appearance count
+// under its typo (`count_of_isssue_appearances`, same as person SRV-20 / team
+// SRV-22 / concept SRV-26) and the two previously-missing fields (`episodes`,
+// `first_appeared_in_episode`). `image` is the live name (the internal
+// `image_url` column is not a live key, so it is not allowed).
 const storyArcFields = new Set([
-  "aliases", "api_detail_url", "count_of_issue_appearances", "date_added",
-  "date_last_updated", "deck", "description", "first_appeared_in_issue", "id", "image",
-  "issues", "movies", "name", "publisher", "site_detail_url"
+  "aliases", "api_detail_url", "count_of_isssue_appearances", "date_added",
+  "date_last_updated", "deck", "description", "episodes", "first_appeared_in_episode",
+  "first_appeared_in_issue", "id", "image", "issues", "movies", "name", "publisher",
+  "site_detail_url"
 ]);
-const storyArcRelationshipFields = new Set(["issues", "movies"]);
+const storyArcRelationshipFields = new Set(["issues", "movies", "episodes"]);
 // SRV-26: the live API emits the appearance count under its typo name and always
 // returns the three relationship collections (never null); the allowlist uses the
 // live names so field_list matches the live API (same as person SRV-20 / team SRV-22).

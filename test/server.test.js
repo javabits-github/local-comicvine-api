@@ -17,7 +17,7 @@ database.exec("CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, ima
 database.exec("CREATE TABLE cv_volume (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, team_credits TEXT, date_added TEXT, date_last_updated TEXT, deck TEXT)");
 database.exec("CREATE TABLE cv_issue (id INTEGER PRIMARY KEY, volume_id INTEGER, name TEXT, issue_number TEXT, cover_date TEXT, store_date TEXT, description TEXT, image_url TEXT, site_detail_url TEXT, character_credits TEXT, person_credits TEXT, team_credits TEXT, location_credits TEXT, story_arc_credits TEXT, associated_images TEXT)");
 database.exec("CREATE TABLE cv_team (id INTEGER PRIMARY KEY, name TEXT, publisher TEXT, aliases TEXT, count_of_team_members INTEGER, count_of_issue_appearances INTEGER, deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT, image_url TEXT, site_detail_url TEXT, first_appeared_in_issue TEXT, character_enemies TEXT, character_friends TEXT, characters TEXT, disbanded_in_issues TEXT, issue_credits TEXT, issues_disbanded_in TEXT, movies TEXT, story_arc_credits TEXT, volume_credits TEXT)");
-database.exec("CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, count_of_issue_appearances INTEGER, date_added TEXT, first_appeared_in_issue TEXT, publisher TEXT, site_detail_url TEXT, issues TEXT, movies TEXT)");
+database.exec("CREATE TABLE cv_storyarc (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, count_of_issue_appearances INTEGER, date_added TEXT, first_appeared_in_issue TEXT, publisher TEXT, site_detail_url TEXT, issues TEXT, movies TEXT, episodes TEXT, first_appeared_in_episode TEXT)");
 // UPD-11: no api_detail_url column — the server derives it from the id (like team/concept).
 database.exec("CREATE TABLE cv_person (id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, birth TEXT, count_of_issue_appearances INTEGER, country TEXT, date_added TEXT, date_last_updated TEXT, death TEXT, gender TEXT, hometown TEXT, email TEXT, website TEXT, image_url TEXT, created_characters TEXT, issue_credits TEXT, story_arc_credits TEXT, volume_credits TEXT, site_detail_url TEXT)");
 // UPD-13: no api_detail_url column — the server derives it from the id (like team).
@@ -38,8 +38,8 @@ database.prepare("INSERT INTO cv_team (id, name, publisher, aliases, count_of_te
     .    run(1800, "The Hand", J({ id: 31, name: "Marvel" }), "The Hand (Marvel)", 93, 180, "A secret organization of assassins", "The Hand is a secret organization of assassins that operates in the shadows.", "2020-04-15 10:00:00", "2021-05-01 08:30:00", "https://example.test/the-hand.jpg", "https://example.test/the-hand/", J({ id: 20965, name: "Elektra", issue_number: "168" }), J([]), J([]), J([]), J([]), J([]), J([]), J([]), J([]), J([]));
 database.prepare("INSERT INTO cv_team (id, name, date_added) VALUES (?, ?, ?)")
     .run(1801, "Avengers", "1899-01-01 00:00:00");
-database.prepare("INSERT INTO cv_storyarc (id, name, aliases, count_of_issue_appearances, date_added, first_appeared_in_issue, publisher, site_detail_url, issues, movies) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(3000, "Secret Wars", "Secret Wars (1984)", 12, "2020-04-15 10:00:00", J({ id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }), J({ id: 31, name: "Marvel" }), "https://example.test/secret-wars/", J([{ id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }]), J([]));
+database.prepare("INSERT INTO cv_storyarc (id, name, aliases, count_of_issue_appearances, date_added, first_appeared_in_issue, publisher, site_detail_url, issues, movies, episodes, first_appeared_in_episode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(3000, "Secret Wars", "Secret Wars (1984)", 12, "2020-04-15 10:00:00", J({ id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }), J({ id: 31, name: "Marvel" }), "https://example.test/secret-wars/", J([{ id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }]), J([]), J([{ id: 45893, name: "Episode 1", api_detail_url: "https://comicvine.gamespot.com/api/episodes/4070-45893/", site_detail_url: "https://comicvine.gamespot.com/marvel-zombies-101-episode-1/4070-45893/" }]), J({ id: 45895, name: "Episode 3", api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_episode/4070-45895/", episode_number: "103" }));
 database.prepare("INSERT INTO cv_storyarc (id, name, date_added) VALUES (?, ?, ?)")
     .run(3001, "Civil War", "1899-01-01 00:00:00");
 database.prepare("INSERT INTO cv_person (id, name, aliases, birth, count_of_issue_appearances, country, date_added, date_last_updated, death, gender, hometown, email, website, image_url, created_characters, issue_credits, story_arc_credits, volume_credits, site_detail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -557,7 +557,7 @@ test("emits the full team shape with live names and types (SRV-22)", async () =>
 });
 
 test("supports story arc fields, sorting, pagination, and filters", async () => {
-  const response = await fetch(`${baseUrl}/api/story_arcs?format=json&sort=name:desc&limit=1&field_list=id,name,count_of_issue_appearances,publisher,first_appeared_in_issue`);
+  const response = await fetch(`${baseUrl}/api/story_arcs?format=json&sort=name:desc&limit=1&field_list=id,name,count_of_isssue_appearances,publisher,first_appeared_in_issue`);
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -565,7 +565,7 @@ test("supports story arc fields, sorting, pagination, and filters", async () => 
   assert.deepEqual(body.results, [{
     id: 3000,
     name: "Secret Wars",
-    count_of_issue_appearances: 12,
+    count_of_isssue_appearances: 12,
     publisher: { id: 31, name: "Marvel" },
     first_appeared_in_issue: { id: 12345, name: "Marvel Super Heroes Secret Wars", issue_number: "1" }
   }]);
@@ -602,6 +602,40 @@ test("serves singular story arc details with issues and movies fields", async ()
   const apiAlias = await fetch(`${baseUrl}/api/story_arc/4040-3000/?format=xml&field_list=id,name,movies`);
   assert.match(apiAlias.headers.get("content-type"), /application\/xml/);
   assert.match(await apiAlias.text(), /<movies><\/movies>/);
+});
+
+test("serves story arc api_detail_url, count typo, episodes, and first_appeared_in_episode (SRV-23)", async () => {
+  // Populated arc (id=3000): the new fields are emitted with the live shape.
+  const response = await fetch(`${baseUrl}/api/story_arc/4045-3000/?format=json`);
+  const body = await response.json();
+  const arc = body.results;
+
+  assert.equal(response.status, 200);
+  // api_detail_url is derived from the id (domain prefix 4045) — the column was never stored.
+  assert.equal(arc.api_detail_url, "https://comicvine.gamespot.com/api/story_arc/4045-3000/");
+  // The appearance count is emitted under the live typo name (the stored column keeps the corrected spelling).
+  assert.equal(arc.count_of_isssue_appearances, 12);
+  // episodes is a relationship collection (always an array); the entry keeps the live key order (id-first).
+  assert.deepEqual(Object.keys(arc.episodes[0]), ["id", "name", "api_detail_url", "site_detail_url"]);
+  assert.deepEqual(arc.episodes, [{ id: 45893, name: "Episode 1", api_detail_url: "https://comicvine.gamespot.com/api/episodes/4070-45893/", site_detail_url: "https://comicvine.gamespot.com/marvel-zombies-101-episode-1/4070-45893/" }]);
+  // first_appeared_in_episode is a scalar ref; the entry keeps the live key order (id-first).
+  assert.deepEqual(Object.keys(arc.first_appeared_in_episode), ["id", "name", "api_detail_url", "episode_number"]);
+  assert.deepEqual(arc.first_appeared_in_episode, { id: 45895, name: "Episode 3", api_detail_url: "https://comicvine.gamespot.com/api/first_appeared_in_episode/4070-45895/", episode_number: "103" });
+
+  // Minimal arc (id=3001): episodes is [] (the live API never returns null) and
+  // first_appeared_in_episode is null (the live API emits null, not an absent key).
+  const minimal = await (await fetch(`${baseUrl}/api/story_arc/4045-3001/?format=json`)).json();
+  assert.deepEqual(minimal.results.episodes, []);
+  assert.equal(minimal.results.first_appeared_in_episode, null);
+
+  // The list endpoint emits the new fields too.
+  const list = await (await fetch(`${baseUrl}/api/story_arcs?format=json&limit=10`)).json();
+  const byId = Object.fromEntries(list.results.map((r) => [r.id, r]));
+  assert.deepEqual(byId[3000].episodes, arc.episodes);
+  assert.deepEqual(byId[3000].first_appeared_in_episode, arc.first_appeared_in_episode);
+  assert.equal(byId[3000].count_of_isssue_appearances, 12);
+  assert.deepEqual(byId[3001].episodes, []);
+  assert.equal(byId[3001].first_appeared_in_episode, null);
 });
 
 test("supports publisher fields, sorting, pagination, and filters", async () => {

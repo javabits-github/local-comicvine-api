@@ -1309,7 +1309,7 @@ class ComicVineUpdater {
       const params = {
         field_list: "id,name,publisher,aliases,count_of_isssue_appearances," +
           "deck,description,date_added,date_last_updated,image," +
-          "site_detail_url,first_appeared_in_issue",
+          "site_detail_url,first_appeared_in_issue,episodes,first_appeared_in_episode",
         offset, limit
       };
       if (!full) params.filter = `date_last_updated:${startDate}|${endDate}`;
@@ -1350,6 +1350,16 @@ class ComicVineUpdater {
         const faiIssueNumber = firstAppeared ? (firstAppeared.issue_number ?? null) : null;
         const faiKeyOrder = firstAppeared ? JSON.stringify(Object.keys(firstAppeared)) : null;
 
+        // SRV-23/UPD-9: the two fields the live API emits but the updater never
+        // stored. episodes is a relationship collection (the live API always
+        // returns an array, never null) so it is stored via jsonifyCollection
+        // ("[]" for empty); first_appeared_in_episode is a scalar ref (mostly
+        // null) stored as-is. Both are COALESCE'd on conflict (the SRV-6b
+        // keep-existing pattern) so a transient null never wipes a
+        // previously-populated value.
+        const episodes = jsonifyCollection(arc.episodes);
+        const firstAppearedEpisode = jsonify(arc.first_appeared_in_episode);
+
         this.conn.prepare(`
           INSERT INTO cv_storyarc
             (id, name, aliases, count_of_issue_appearances,
@@ -1357,8 +1367,9 @@ class ComicVineUpdater {
              image_url, site_detail_url,
              publisher_id, publisher_name, publisher_site_detail_url, publisher_key_order,
              first_appeared_in_issue_id, first_appeared_in_issue_name,
-             first_appeared_in_issue_issue_number, first_appeared_in_issue_key_order)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             first_appeared_in_issue_issue_number, first_appeared_in_issue_key_order,
+             episodes, first_appeared_in_episode)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             aliases = excluded.aliases,
@@ -1376,7 +1387,9 @@ class ComicVineUpdater {
             first_appeared_in_issue_id = COALESCE(excluded.first_appeared_in_issue_id, cv_storyarc.first_appeared_in_issue_id),
             first_appeared_in_issue_name = COALESCE(excluded.first_appeared_in_issue_name, cv_storyarc.first_appeared_in_issue_name),
             first_appeared_in_issue_issue_number = COALESCE(excluded.first_appeared_in_issue_issue_number, cv_storyarc.first_appeared_in_issue_issue_number),
-            first_appeared_in_issue_key_order = COALESCE(excluded.first_appeared_in_issue_key_order, cv_storyarc.first_appeared_in_issue_key_order)
+            first_appeared_in_issue_key_order = COALESCE(excluded.first_appeared_in_issue_key_order, cv_storyarc.first_appeared_in_issue_key_order),
+            episodes = COALESCE(excluded.episodes, cv_storyarc.episodes),
+            first_appeared_in_episode = COALESCE(excluded.first_appeared_in_episode, cv_storyarc.first_appeared_in_episode)
         `).run(
           arcId, jsonify(arc.name),
           jsonify(arc.aliases),
@@ -1385,7 +1398,8 @@ class ComicVineUpdater {
           jsonify(arc.date_added), jsonify(arc.date_last_updated),
           imageUrl, arc.site_detail_url,
           publisherId, publisherName, publisherSiteDetailUrl, publisherKeyOrder,
-          faiId, faiName, faiIssueNumber, faiKeyOrder
+          faiId, faiName, faiIssueNumber, faiKeyOrder,
+          episodes, firstAppearedEpisode
         );
 
         if (exists) this.stats.storyarcs_updated++;

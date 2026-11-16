@@ -25,8 +25,8 @@ const sortableTeamFields = new Set([
   "date_last_updated", "deck", "description", "id", "name", "site_detail_url"
 ]);
 const sortableStoryArcFields = new Set([
-  "aliases", "count_of_issue_appearances", "date_added", "date_last_updated",
-  "deck", "description", "id", "name", "site_detail_url"
+  "aliases", "count_of_issue_appearances", "count_of_isssue_appearances", "date_added",
+  "date_last_updated", "deck", "description", "id", "name", "site_detail_url"
 ]);
 const sortableConceptFields = new Set([
   "aliases", "count_of_issue_appearances", "count_of_isssue_appearances", "date_added",
@@ -965,13 +965,27 @@ function buildResult(row, singular) {
    name: row.name,
    publisher
     };
-  for (const field of ["aliases", "count_of_issue_appearances", "deck", "description", "date_added", "date_last_updated", "image_url", "site_detail_url"]) {
+  // SRV-23: the live API always emits api_detail_url; derive it from the id
+  // (canonical base URL + domain prefix 4045 + id) — the column was never stored.
+  result.api_detail_url = buildApiDetailUrl("story_arc", row.id);
+  for (const field of ["aliases", "deck", "description", "date_added", "date_last_updated", "site_detail_url"]) {
    if (has(field)) result[field] = row[field];
   }
+  // SRV-23: the live API emits the appearance count under its typo name; the
+  // stored column keeps the corrected spelling (same as person SRV-20 / team SRV-22).
+  if (has("count_of_issue_appearances")) result.count_of_isssue_appearances = row.count_of_issue_appearances;
+  // SRV-23: image is built from the stored image_url; the internal column is not emitted.
   if (has("image_url")) result.image = row.image_url ? { original_url: row.image_url } : null;
   if (has("first_appeared_in_issue")) result.first_appeared_in_issue = parseJsonColumn(row.first_appeared_in_issue);
-  for (const rel of ["issues", "movies"]) {
-   if (has(rel)) result[rel] = parseJsonColumn(row[rel]);
+  // SRV-23: first_appeared_in_episode is a scalar ref (mostly null on live); emit
+  // the stored JSON as-is, null when the column is absent/NULL.
+  if (has("first_appeared_in_episode")) result.first_appeared_in_episode = parseJsonColumn(row.first_appeared_in_episode) ?? null;
+  for (const rel of ["issues", "movies", "episodes"]) {
+   if (!has(rel)) continue;
+   // SRV-23: episodes is a relationship collection the live API always returns as
+   // an array (never null); emit the stored JSON as-is, [] when absent/NULL.
+   // issues/movies keep the plain parseJsonColumn (they can be null on live).
+   result[rel] = rel === "episodes" ? (parseCredits(row[rel]) ?? []) : parseJsonColumn(row[rel]);
   }
   return result;
   }
@@ -1128,8 +1142,8 @@ function columnExpression(config, field) {
   if (config.singular === "issue" && (lower === "volume" || lower === "volume_id")) {
    return { kind: "volume" };
    }
-  // SRV-20/SRV-22/SRV-26: the live API's typo count name maps to the corrected-spelling column.
-  if ((config.singular === "person" || config.singular === "team" || config.singular === "concept") && lower === "count_of_isssue_appearances") {
+  // SRV-20/SRV-22/SRV-23/SRV-26: the live API's typo count name maps to the corrected-spelling column.
+  if ((config.singular === "person" || config.singular === "team" || config.singular === "concept" || config.singular === "story_arc") && lower === "count_of_isssue_appearances") {
    return { kind: "column", expression: `${config.alias}.count_of_issue_appearances` };
    }
   if (config.columns.has(lower)) {
