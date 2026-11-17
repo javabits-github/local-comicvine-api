@@ -1,9 +1,6 @@
----
-description: "Use when: changing or extending the ComicVine API response shape in src/server.js — the response envelope, field_list projection, filters, sorting, limits, or formats. Covers the envelope contract, per-resource field allowlists, and the volume/issue special cases."
-applyTo: "src/server.js"
----
-
 # ComicVine API Contract (src/server.js)
+
+Guidance for changing or extending the ComicVine API response shape in `src/server.js` — the response envelope, field_list projection, filters, sorting, limits, or formats. Covers the envelope contract, per-resource field allowlists, and the volume/issue special cases.
 
 ## Response envelope
 

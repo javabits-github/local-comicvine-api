@@ -8,19 +8,22 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 - `npm test` — run the node built-in tests (`node --test`)
 - `npm sync` — incremental sync from the live API (`node src/updater.js`)
 - `npm sync:full` — one-time full sync (thousands of live API calls; no date filter; gated behind a `yes` confirmation, or `--yes` in non-interactive runs)
+- `npm run rawapi` / `npm run rawapi:full` — sync the verbatim-JSON ground-truth DB (`src/rawapi.js`)
+- `npm run migrate` — apply schema migrations only, no API calls (`src/migrate.js`)
 
 ## Architecture
 
 - `src/server.js` is a single-file server using only `node:http` and `node:sqlite`. No npm dependencies.
-- `localcv.db` has seven normalized tables (`cv_publisher`, `cv_volume`, `cv_issue`, `cv_person`, `cv_team`, `cv_storyarc`, `cv_concept`) plus `cv_sync_metadata`. Resources without a table (character, location, object, power) return 404.
+- `localcv.db` has eleven resource tables (`cv_publisher`, `cv_volume`, `cv_issue`, `cv_person`, `cv_team`, `cv_storyarc`, `cv_concept`, `cv_character`, `cv_location`, `cv_power`, `cv_object`) plus `cv_sync_metadata`. Eight are normalized (relationships in `cv_*_credit` join tables); character, location, and power still store their relationships as JSON text.
 - The updater is Node.js (`src/updater.js`) using `node:sqlite` and global `fetch` — zero npm dependencies, sharing the server's runtime. Its class is `ComicVineUpdater`. (The original Python updater was removed from the repo when the Node port was adopted; its history is preserved in the git log.)
+- `src/rawapi.js` is a third process that keeps `comicvine_rawapi_*.db` in step with the live API (verbatim JSON); `src/migrate.js` applies one-shot schema migrations (also run by the updater at startup).
 
 ## The data contract (most common source of bugs)
 
-- Relationship/credit columns in the DB are **JSON text**: arrays of `{id, name, api_detail_url, site_detail_url}` (plus `role` for person credits, `count` for volume credits), or JSON objects for scalar refs (`death`, `birth`, `publisher`, `first_appeared_in_issue`). **Exception (SRV-6c):** `cv_volume`'s `first_issue`/`last_issue` are normalized into the `cv_volume_issue_ref` join table (`issue_id` FK + `key_order`; display fields resolved via `LEFT JOIN cv_issue`), and its six credit arrays into `cv_volume_credit` — the JSON columns are dropped after the updater backfill.
+- Relationship/credit columns in the DB are **JSON text**: arrays of `{id, name, api_detail_url, site_detail_url}` (plus `role` for person credits, `count` for volume credits), or JSON objects for scalar refs (`death`, `birth`, `publisher`, `first_appeared_in_issue`). **Exception:** eight tables (publisher, volume, issue, person, team, storyarc, concept, object) are normalized — their relationship collections live in `cv_*_credit` join tables (plus `cv_volume_issue_ref` for a volume's first/last issue and `cv_issue_image` for an issue's images), and the JSON columns are dropped by the migrations. Only character, location, and power still store relationships as JSON text.
 - The live API returns dict/list values for fields like `death`, `birth`, `publisher`, `gender` in **~14% of records**. `node:sqlite` cannot bind objects — every bound value in the updater goes through `jsonify()` (object → `JSON.stringify`, boolean → `1`/`0`, `null`/`undefined` → `null`, else pass-through). Never add a new upsert without `jsonify` on every bound value.
 - The server parses these with `parseJsonColumn`/`parseCredits` in JS; SQL never parses JSON.
-- `localcv.db` is a synced **subset**, not the full universe: ids referenced inside JSON collections usually do NOT resolve to local rows, and entities like character/location/object/movie have no local table at all. The denormalized fields inside the JSON are the only source of that data.
+- `localcv.db` is a synced **subset**, not the full universe: ids referenced inside JSON collections usually do NOT resolve to local rows, and entities like `movie` have no local table at all. The denormalized fields inside the JSON are the only source of that data.
 
 ## ComicVine live API semantics
 
@@ -42,9 +45,12 @@ A local, read-only mock of the ComicVine API: a Node.js server (`src/server.js`)
 - **Windows environment** (this machine): `node -e` with complex quotes breaks in PowerShell — write a temp `.js` file to the session files folder and run the file instead. `os.remove`/`fs.rmSync` on a just-closed SQLite DB fails with WinError 32 (WAL mode) — close all connections first or delete after the process exits.
 - All `*.db` files (live DB, dated snapshots, raw dumps, the rawapi DB `comicvine_rawapi_*.db`, `-wal`/`-shm`) are gitignored and excluded from indexing — never commit or read them as text.
 - Track open work in `TODO.md` using its item IDs (SRV-n, UPD-n, DB-n, DOC-n); mark items `[x]` when done.
-- Developer decisions are journaled in the Developer Notes section of `README.md` (newest entry on top).
+- Developer decisions are journaled in `docs/dev-notes.md` (newest entry on top).
 
 ## Docs
 
-- `README.md` — server usage, endpoints, env vars, updater sync commands, and the rawapi sync (`npm run rawapi`, [src/rawapi.js](../src/rawapi.js)); the full flag references live in each sync section and the `src/updater.js` / `src/rawapi.js` headers
+- `README.md` — server usage, endpoints, env vars, updater sync commands, and the rawapi sync (`npm run rawapi`, [src/rawapi.js](src/rawapi.js)); the full flag references live in each sync section and the `src/updater.js` / `src/rawapi.js` headers
+- `docs/architecture.md` — request flow, sync pipeline, and database schema
+- `stack.md` — the technology stack overview
+- `docs/dev-notes.md` — the development diary (decisions, gotchas, experiments)
 - `TODO.md` — open items with IDs
