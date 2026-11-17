@@ -1374,9 +1374,9 @@ const MIGRATIONS = [
   // rows emits [] for each (the live API never returns null).
   //
   // It backfills the join table from the JSON columns and then drops those
-  // columns. It is a no-op when the JSON columns are already gone (final schema)
-  // or the table is absent (a fresh database has the final schema with no JSON
-  // columns; localcv.db has no cv_object table at all, so this is a no-op there).
+  // columns. It is a no-op when the JSON columns are already gone (final schema —
+  // a fresh database and localcv.db both have the final schema) or the table is
+  // absent (a minimal DB).
   {
     version: 11,
     name: "SRV-6h object normalization",
@@ -1385,8 +1385,9 @@ const MIGRATIONS = [
       const jsonCols = [
         "issue_credits", "volume_credits", "story_arc_credits", "movies"
       ].filter((c) => objectCols.includes(c));
-      // Nothing to migrate if the JSON columns are already gone (final schema) or
-      // the table is absent (a fresh database / localcv.db has no cv_object).
+      // Nothing to migrate if the JSON columns are already gone (final schema —
+      // a fresh database and localcv.db both have the final schema) or the table
+      // is absent (a minimal DB).
       if (jsonCols.length === 0) return true;
 
       log("  Normalizing objects into cv_object_credit...");
