@@ -93,22 +93,38 @@ test("migrate() builds the final schema on a fresh database and stamps it", () =
     assert.ok(tables.has("cv_sync_metadata"));
     assert.ok(tables.has("sync_errors"));
     assert.ok(tables.has("schema_version"));
-    // The seven resource tables the Node updater creates.
-    for (const t of ["cv_team", "cv_storyarc", "cv_concept", "cv_character", "cv_location", "cv_power", "cv_object"]) {
+    // The eleven resource tables (the four legacy tables included — DB-3).
+    for (const t of ["cv_publisher", "cv_volume", "cv_issue", "cv_person", "cv_team", "cv_storyarc", "cv_concept", "cv_character", "cv_location", "cv_power", "cv_object"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
     // The join tables.
     for (const t of ["cv_volume_credit", "cv_volume_issue_ref", "cv_concept_credit", "cv_publisher_credit", "cv_team_credit", "cv_person_credit", "cv_storyarc_credit", "cv_object_credit", "cv_issue_credit", "cv_issue_image"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
-    // FTS indexes for the seven created resource tables (the four legacy base
-    // tables are absent, so they get no FTS table).
-    for (const t of ["cv_team_fts", "cv_storyarc_fts", "cv_concept_fts", "cv_character_fts", "cv_location_fts", "cv_power_fts", "cv_object_fts"]) {
+    // FTS indexes for all eleven resource tables.
+    for (const t of ["cv_publisher_fts", "cv_volume_fts", "cv_issue_fts", "cv_person_fts", "cv_team_fts", "cv_storyarc_fts", "cv_concept_fts", "cv_character_fts", "cv_location_fts", "cv_power_fts", "cv_object_fts"]) {
       assert.ok(tables.has(t), `expected ${t}`);
     }
-    // The four legacy tables are Python-updater heritage: never created here.
-    for (const t of ["cv_publisher", "cv_issue", "cv_volume", "cv_person"]) {
-      assert.ok(!tables.has(t), `${t} should not be created`);
+    // The four legacy tables are created on the final schema (DB-3): the JSON
+    // collection columns and api_detail_url are absent, and the presence
+    // bitmasks (volume/issue) are present.
+    const publisherCols = columnNames(db, "cv_publisher");
+    for (const c of ["characters", "story_arcs", "teams", "volumes", "api_detail_url"]) {
+      assert.ok(!publisherCols.includes(c), `cv_publisher.${c} should be absent`);
+    }
+    const volumeCols = columnNames(db, "cv_volume");
+    assert.ok(volumeCols.includes("credits_presence"), "cv_volume.credits_presence should be present");
+    for (const c of ["character_credits", "person_credits", "first_issue", "last_issue", "api_detail_url"]) {
+      assert.ok(!volumeCols.includes(c), `cv_volume.${c} should be absent`);
+    }
+    const issueCols = columnNames(db, "cv_issue");
+    assert.ok(issueCols.includes("credits_presence"), "cv_issue.credits_presence should be present");
+    for (const c of ["character_credits", "associated_images", "first_appearance_characters", "api_detail_url"]) {
+      assert.ok(!issueCols.includes(c), `cv_issue.${c} should be absent`);
+    }
+    const personCols = columnNames(db, "cv_person");
+    for (const c of ["created_characters", "issue_credits", "story_arc_credits", "volume_credits", "api_detail_url"]) {
+      assert.ok(!personCols.includes(c), `cv_person.${c} should be absent`);
     }
     // cv_concept is created on the final schema (no legacy columns).
     const conceptCols = columnNames(db, "cv_concept");

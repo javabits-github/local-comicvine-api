@@ -2117,9 +2117,9 @@ class ComicVineUpdater {
       if (last) this.log(`${ep.label} last synced: ${last}`);
       // UPD-18: a null start means "no window can help" — run a full sync
       // (no date filter) for this endpoint, or skip it if its table does not
-      // exist at all (a fresh database: the four legacy tables are
-      // Python-updater heritage and are not created by migrate.js, so a full
-      // sync would only burn API calls into "no such table" failures).
+      // exist at all (a defensive tier: migrate.js creates all eleven tables,
+      // so this only triggers for a table that is absent despite that — a full
+      // sync would otherwise burn API calls into "no such table" failures).
       const full = this.full || start === null;
       if (start === null && !this.tableExists(ep.table)) {
         this.log(

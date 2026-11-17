@@ -850,13 +850,13 @@ test("runSync runs a full sync (no date filter) for an endpoint with no history 
   }
 });
 
-test("runSync skips an endpoint whose table is absent (a fresh database)", async () => {
-  // A bare DB file: migrate() creates the six newer tables + metadata, but
-  // the four legacy tables (cv_publisher, …) are Python-updater heritage and
-  // are never created — so publishers must be skipped, not full-synced into
-  // a void (which would burn API calls into "no such table" failures).
-  const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-absent-"));
-  const dbPath = path.join(dir, "absent.db");
+test("runSync runs a full sync for a legacy endpoint on a fresh database (migrate.js creates the tables)", async () => {
+  // A bare DB file: migrate() creates all eleven tables (the four legacy tables
+  // included — DB-3), so cv_publisher is present but empty and runs a full sync
+  // (no date filter) rather than being skipped (the UPD-18 skip tier is now a
+  // defensive path for a table that is absent despite migrate.js).
+  const dir = mkdtempSync(path.join(os.tmpdir(), "comicvine-upd-fresh-"));
+  const dbPath = path.join(dir, "fresh.db");
   new DatabaseSync(dbPath).close();
   try {
     const { fn, calls } = makeMockFetch();
@@ -869,8 +869,17 @@ test("runSync skips an endpoint whose table is absent (a fresh database)", async
     assert.ok(updater.connect());
     await updater.runSync();
     updater.close();
-    assert.equal(calls.filter((u) => new URL(u).pathname.includes("/publishers/")).length, 0, "no publishers API calls");
-    assert.ok(lines.some((l) => l.includes("does not exist in this database — skipping")), "the skip was announced");
+    const listCalls = calls.filter((u) => new URL(u).pathname.includes("/publishers/"));
+    assert.ok(listCalls.length > 0, "the publishers list was called");
+    for (const u of listCalls) {
+      assert.equal(new URL(u).searchParams.get("filter"), null, "an auto full sync must not include a date filter");
+    }
+    assert.ok(lines.some((l) => l.includes("running a FULL sync")), "the auto full sync was announced");
+    // The publisher was stored and the metadata stamped.
+    const db = new DatabaseSync(dbPath);
+    assert.equal(db.prepare("SELECT COUNT(*) c FROM cv_publisher").get().c, 1);
+    assert.ok(db.prepare("SELECT last_sync_date FROM cv_sync_metadata WHERE endpoint = 'publishers'").get().last_sync_date);
+    db.close();
   } finally {
     cleanupTempDir(dir);
   }

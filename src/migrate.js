@@ -143,14 +143,56 @@ function ensureMetadataTables(conn, log) {
   `);
 }
 
-// The seven resource tables the Node updater creates (the four legacy tables —
-// cv_publisher/cv_issue/cv_volume/cv_person — are Python-updater heritage and
-// are never created here; see DB-3). The CREATEs describe the final schema:
-// cv_concept already carries first_appeared_in_issue_id and no
+// The eleven resource tables (the four legacy tables — cv_publisher/cv_volume/
+// cv_issue/cv_person — are Python-updater heritage; DB-3 adds their CREATEs so
+// a fresh database builds the full final schema). The CREATEs describe the final
+// schema: cv_concept already carries first_appeared_in_issue_id and no
 // api_detail_url / first_appeared_in_issue JSON (the UPD-13/UPD-11/UPD-15
 // upgrades for pre-existing databases are versioned migrations below).
 function ensureResourceTables(conn, log) {
   if (!conn) return;
+  // The four legacy tables (Python-updater heritage). Created on the final
+  // schema so a fresh database builds the complete schema from scratch (DB-3).
+  // cv_volume and cv_issue carry the FKs to cv_publisher and cv_volume, so they
+  // are created in dependency order. The relationship collections live in the
+  // cv_*_credit join tables (ensureJoinTables); the JSON columns were dropped by
+  // the one-shot migrations (v2/v4/v7/v9/v12) for pre-existing databases.
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_publisher (
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT,
+      deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
+      image_url TEXT, site_detail_url TEXT,
+      location_address TEXT, location_city TEXT, location_state TEXT
+    )
+  `);
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_volume (
+      id INTEGER PRIMARY KEY, name TEXT NOT NULL, aliases TEXT,
+      start_year TEXT, publisher_id INTEGER, count_of_issues INTEGER,
+      deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
+      image_url TEXT, site_detail_url TEXT, credits_presence INTEGER,
+      FOREIGN KEY (publisher_id) REFERENCES cv_publisher(id)
+    )
+  `);
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_issue (
+      id INTEGER PRIMARY KEY, volume_id INTEGER NOT NULL, name TEXT,
+      issue_number TEXT, cover_date TEXT, store_date TEXT,
+      deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
+      image_url TEXT, site_detail_url TEXT, aliases TEXT,
+      has_staff_review INTEGER, credits_presence INTEGER,
+      FOREIGN KEY (volume_id) REFERENCES cv_volume(id)
+    )
+  `);
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS cv_person (
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT,
+      birth TEXT, death TEXT, gender TEXT, country TEXT, hometown TEXT,
+      email TEXT, website TEXT,
+      deck TEXT, description TEXT, date_added TEXT, date_last_updated TEXT,
+      image_url TEXT, site_detail_url TEXT, count_of_issue_appearances INTEGER
+    )
+  `);
   // SRV-6e: the two scalar refs (publisher, first_appeared_in_issue) are stored
   // as id + inline display fields + key_order (byte-for-byte safe — the updater
   // refreshes them in lockstep with the team row, so a LEFT JOIN would diverge
@@ -809,7 +851,7 @@ const MIGRATIONS = [
         "first_appearance_locations", "first_appearance_objects",
         "first_appearance_storyarcs", "first_appearance_teams"
       ].filter((c) => issueCols.includes(c));
-      if (cols.length === 0) return true; // no cv_issue table (fresh DB) or no columns
+      if (cols.length === 0) return true; // no first_appearance_* columns (final schema) or no cv_issue table (minimal DB)
       try {
         for (const c of cols) {
           inTransaction(conn, () => {
@@ -842,9 +884,9 @@ const MIGRATIONS = [
     up(conn, log) {
       const publisherCols = tableColumns(conn, "cv_publisher");
       const collectionCols = ["characters", "story_arcs", "teams", "volumes"].filter((c) => publisherCols.includes(c));
-      // Nothing to migrate if the JSON columns are already gone (final schema) or
-      // the table is absent (a fresh database has no cv_publisher — it is
-      // Python-updater heritage, see DB-3).
+      // Nothing to migrate if the JSON columns are already gone (final schema —
+      // a fresh database has the final schema) or the table is absent (a minimal
+      // DB).
       if (collectionCols.length === 0) return true;
 
       log("  Normalizing publisher collections into cv_publisher_credit...");
@@ -1097,9 +1139,9 @@ const MIGRATIONS = [
     up(conn, log) {
       const personCols = tableColumns(conn, "cv_person");
       const collectionCols = ["created_characters", "issue_credits", "story_arc_credits", "volume_credits"].filter((c) => personCols.includes(c));
-      // Nothing to migrate if the JSON columns are already gone (final schema) or
-      // the table is absent (a fresh database has no cv_person — it is
-      // Python-updater heritage, see DB-3).
+      // Nothing to migrate if the JSON columns are already gone (final schema —
+      // a fresh database has the final schema) or the table is absent (a minimal
+      // DB).
       if (collectionCols.length === 0) return true;
 
       log("  Normalizing person collections into cv_person_credit...");
@@ -1443,9 +1485,8 @@ const MIGRATIONS = [
   // associated_images) are never null, so they emit [] when they have no rows.
   //
   // It backfills the join tables + bitmask from the JSON columns and then drops those
-  // columns. It is a no-op when the JSON columns are already gone (final schema) or
-  // the table is absent (cv_issue is Python-updater heritage, never created here; a
-  // fresh database has no cv_issue, so this is a no-op there).
+  // columns. It is a no-op when the JSON columns are already gone (final schema —
+  // a fresh database has the final schema) or the table is absent (a minimal DB).
   {
     version: 12,
     name: "SRV-6f issue normalization",
@@ -1471,8 +1512,9 @@ const MIGRATIONS = [
       };
       const presentCredit = Object.entries(creditCols).filter(([type, col]) => issueCols.includes(col));
       const hasImages = issueCols.includes("associated_images");
-      // Nothing to migrate if the JSON columns are already gone (final schema) or
-      // the table is absent (a fresh database has no cv_issue).
+      // Nothing to migrate if the JSON columns are already gone (final schema —
+      // a fresh database has the final schema) or the table is absent (a minimal
+      // DB).
       if (presentCredit.length === 0 && !hasImages) return true;
 
       // Add the presence bitmask column (idempotent).
