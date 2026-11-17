@@ -41,7 +41,6 @@
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("node:fs");
 const path = require("node:path");
-const os = require("node:os");
 const readline = require("node:readline/promises");
 const { migrate } = require("./migrate.js");
 

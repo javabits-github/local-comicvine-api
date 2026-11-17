@@ -17,7 +17,7 @@ A local, read-only mirror of the [ComicVine API](https://comicvine.gamespot.com/
 | `node:fs` | all | File I/O (databases, logs, state). |
 | `node:path` | `server.js`, `updater.js`, `rawapi.js` | Path handling. |
 | `node:zlib` | `server.js` | Optional gzip response compression. |
-| `node:os` | `updater.js` | Temp-directory paths for test/scratch DBs. |
+| `node:os` | `test/*` | Temp-directory paths for throwaway test databases. |
 | `node:readline/promises` | `updater.js`, `rawapi.js` | Interactive prompts (full-sync confirmation). |
 | global `fetch` | `updater.js`, `rawapi.js`, `validate.js` | HTTP client for the live ComicVine API. |
 | `node:test` | `test/*` | The test runner, driven by `node --test`. |
@@ -38,7 +38,7 @@ Supporting modules: `src/fieldConfig.js` (per-resource column/field allowlists, 
 ## Data layer
 
 - **SQLite** in WAL journal mode.
-- `localcv.db` — the served database (normalized columns + JSON-text relationship columns + FTS tables).
+- `localcv.db` — the served database (normalized columns; relationship collections in `cv_*_credit` join tables for the eight normalized resources, JSON text for the three remaining; FTS5 trigram indexes).
 - `comicvine_rawapi_*.db` — the verbatim-JSON ground-truth snapshot (maintained by rawapi, never read by the server).
 - Dated `localcv-*.db` snapshots and `-wal`/`-shm` sidecars.
 - All databases are gitignored (multi-GB, rebuilt by the updater); the schema and table relationships are documented in [docs/architecture.md](docs/architecture.md).
@@ -46,7 +46,7 @@ Supporting modules: `src/fieldConfig.js` (per-resource column/field allowlists, 
 ## External service
 
 - **ComicVine live API** (`comicvine.gamespot.com/api`) — the only external dependency. Consumed by the updater, rawapi, and the server's validation mode; requires a `COMICVINE_API_KEY`.
-- **Rate limit:** 200 calls/hour per key; exceeding it triggers a ban. The updater/rawapi pace and back off against it (see the sync pipeline in [docs/architecture.md](docs/architecture.md)).
+- **Rate limit:** 200 calls/hour per key; exceeding it returns `107` (quota exhausted) until the window resets. The updater/rawapi pace and back off against it (see the sync pipeline in [docs/architecture.md](docs/architecture.md)).
 
 ## Testing
 
