@@ -1745,13 +1745,14 @@ function extractApiKey(request, url) {
   return null;
 }
 
-// SRV-12: a `publisher_id NOT IN (...)` predicate for volume queries. Empty when
-// there is no blocklist or the resource has no publisher_id column. Returns separate
-// clause and values so the caller can append both to a prepared statement.
-function publisherBlocklistPredicate(config, ids) {
+// SRV-34 (was SRV-12): a `publisher_id IN (...)` predicate for volume queries.
+// Empty when there is no allowlist or the resource has no publisher_id column.
+// Returns separate clause and values so the caller can append both to a prepared
+// statement.
+function publisherAllowlistPredicate(config, ids) {
   if (!ids.length || !config.columns.has("publisher_id")) return { clause: "", values: [] };
   const placeholders = ids.map(() => "?").join(", ");
-  return { clause: ` AND ${config.alias}.publisher_id NOT IN (${placeholders})`, values: ids };
+  return { clause: ` AND ${config.alias}.publisher_id IN (${placeholders})`, values: ids };
 }
 
 // Format a stamped log entry as one line: a readable `[timestamp] [LEVEL]`
@@ -1818,15 +1819,17 @@ function createApiServer(
    // endpoints. Unset by default, so client limits are honored.
   const searchForcedLimit = options.searchForcedLimit === undefined ? null : positiveInt(options.searchForcedLimit, null);
 
-   // SRV-12: publisher ids whose volumes are excluded from search and list
-   // results. `options.publisherBlocklist` is an array of ids; when unset it
-   // falls back to the COMICVINE_PUBLISHER_BLOCKLIST env var (comma-separated).
-   // Applied only to volumes (the only resource with a publisher_id column).
-   const publisherBlocklist = parseIdList(
-     options.publisherBlocklist !== undefined
-       ? (Array.isArray(options.publisherBlocklist) ? options.publisherBlocklist.join(",") : options.publisherBlocklist)
-       : process.env.COMICVINE_PUBLISHER_BLOCKLIST
-   );
+    // SRV-34 (was SRV-12): publisher ids whose volumes are the ONLY ones included
+    // in search and list results. `options.publisherAllowlist` is an array of ids;
+    // when unset it falls back to the COMICVINE_PUBLISHER_ALLOWLIST env var
+    // (comma-separated). An EMPTY allowlist means "no restriction" (a no-op until
+    // populated), so existing deployments are unchanged. Applied only to volumes
+    // (the only resource with a publisher_id column).
+    const publisherAllowlist = parseIdList(
+      options.publisherAllowlist !== undefined
+        ? (Array.isArray(options.publisherAllowlist) ? options.publisherAllowlist.join(",") : options.publisherAllowlist)
+        : process.env.COMICVINE_PUBLISHER_ALLOWLIST
+    );
 
    // SRV-13: optional API-key authentication. `options.apiKeys` is an array of
    // accepted keys (or a comma-separated string); when unset it falls back to the
@@ -2169,14 +2172,15 @@ function createApiServer(
         } else {
           orderBy = `${config.alias}.id`;
         }
-        // SRV-12: exclude blocked publishers from volume search. Search has no
-        // ?filter= parameter, so the blocklist always applies when set.
-        const blocklist = config.singular === "volume"
-          ? publisherBlocklistPredicate(config, publisherBlocklist)
+        // SRV-34 (was SRV-12): include only allowlisted publishers' volumes in
+        // search. Search has no ?filter= parameter, so the allowlist always
+        // applies when set.
+        const allowlist = config.singular === "volume"
+          ? publisherAllowlistPredicate(config, publisherAllowlist)
           : { clause: "", values: [] };
         const matched = wrappedDatabase.prepare(
-          `SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${nameMatch.clause}${blocklist.clause} ORDER BY ${orderBy}`
-           ).all(...nameMatch.values, ...blocklist.values);
+          `SELECT * FROM (${config.subquery}) ${config.alias} WHERE ${nameMatch.clause}${allowlist.clause} ORDER BY ${orderBy}`
+           ).all(...nameMatch.values, ...allowlist.values);
         total += matched.length;
         for (const row of matched) allResults.push(projectSearchFields(resource, config.build(row), url.searchParams.get("field_list")));
         }
@@ -2265,8 +2269,9 @@ function createApiServer(
      const limit = resolveLimit(requestedLimit, defaultLimit, maxLimit);
      const offset = Number.isFinite(requestedOffset) ? Math.max(requestedOffset, 0) : 0;
      const { clauses, values } = parseFilters(url.searchParams.get("filter"), config);
-     // SRV-12: exclude blocked publishers from list results, but never override an
-     // explicit publisher filter the client requested (publisher_id or publisher).
+     // SRV-34 (was SRV-12): include only allowlisted publishers' volumes in list
+     // results, but never override an explicit publisher filter the client
+     // requested (publisher_id or publisher).
      const filterText = url.searchParams.get("filter") ?? "";
      const hasPublisherFilter = filterText
        .split(",")
@@ -2274,16 +2279,16 @@ function createApiServer(
          const match = expression.match(/^([a-z][a-z0-9_]*):/i);
          return match && ["publisher_id", "publisher"].includes(match[1].toLowerCase());
        });
-     const blocklist = resource.singular === "volume" && !hasPublisherFilter
-       ? publisherBlocklistPredicate(config, publisherBlocklist)
+     const allowlist = resource.singular === "volume" && !hasPublisherFilter
+       ? publisherAllowlistPredicate(config, publisherAllowlist)
        : { clause: "", values: [] };
-     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}${blocklist.clause}` : (blocklist.clause ? ` WHERE 1 = 1${blocklist.clause}` : "");
+     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}${allowlist.clause}` : (allowlist.clause ? ` WHERE 1 = 1${allowlist.clause}` : "");
      const orderBy = parseSort(config, url.searchParams.get("sort"), sortableFieldsByResource[resource.singular], defaultSort[resource.singular]);
      const total = wrappedDatabase.prepare(`SELECT COUNT(*) AS count FROM (${config.subquery}) ${config.alias}${where}`)
-      .get(...values, ...blocklist.values).count;
+      .get(...values, ...allowlist.values).count;
      const rows = wrappedDatabase.prepare(
       `SELECT * FROM (${config.subquery}) ${config.alias}${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`
-      ).all(...values, ...blocklist.values, limit, offset);
+      ).all(...values, ...allowlist.values, limit, offset);
      const results = rows.map((row) => {
       const built = config.build(row);
       const normalized = resource.singular === "volume" || resource.singular === "issue"

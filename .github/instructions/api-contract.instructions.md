@@ -34,10 +34,10 @@ Every other response (list, detail, search) uses ComicVine's envelope:
 - `resolveLimit(requested, default, max)` clamps to `[1, max]`. Defaults: list 100, search 10, max 100; env overrides `COMICVINE_MAX_LIMIT`, `COMICVINE_DEFAULT_LIMIT`, `COMICVINE_SEARCH_DEFAULT_LIMIT`.
 - `COMICVINE_FORCED_LIMIT` → `options.searchForcedLimit` applies to **search only** (`searchForcedLimit ?? requestedLimit`); list endpoints must keep using the client's `?limit`.
 
-## Publisher blocklist (SRV-12)
+## Publisher allowlist (SRV-34, was SRV-12)
 
-- `COMICVINE_PUBLISHER_BLOCKLIST` (comma-separated ids) or `options.publisherBlocklist` (array) excludes a publisher's **volumes** from search and list results via a `publisher_id NOT IN (...)` predicate (`publisherBlocklistPredicate`). It is the only resource with a `publisher_id` column, so it has no effect on other resources.
-- On the **list** endpoint the blocklist is skipped when the request has an explicit `?filter=publisher_id=` or `?filter=publisher=` term (an explicit filter wins). On **search** there is no `?filter`, so the blocklist always applies when set.
+- `COMICVINE_PUBLISHER_ALLOWLIST` (comma-separated ids) or `options.publisherAllowlist` (array) includes **only** the listed publishers' **volumes** in search and list results via a `publisher_id IN (...)` predicate (`publisherAllowlistPredicate`). An empty/absent allowlist means no restriction (a no-op until populated). It is the only resource with a `publisher_id` column, so it has no effect on other resources.
+- On the **list** endpoint the allowlist is bypassed when the request has an explicit `?filter=publisher_id=` or `?filter=publisher=` term (an explicit filter wins). On **search** there is no `?filter`, so the allowlist always applies when set.
 
 ## Filters (parseFilters)
 

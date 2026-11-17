@@ -2037,11 +2037,11 @@ test("parseBoolFlag treats 0/false/no/off as off and 1/true/yes/on as on (SRV-25
   assert.equal(parseBoolFlag(" Off "), false);
 });
 
-test("excludes blocked publishers from volume search and list (SRV-12)", async () => {
-  const blockDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-blocklist-test-"));
-  const blockDatabasePath = path.join(blockDirectory, "blocklist.db");
-  const blockDatabase = new DatabaseSync(blockDatabasePath);
-  blockDatabase.exec(`
+test("includes only allowlisted publishers' volumes in search and list (SRV-34)", async () => {
+  const allowDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-allowlist-test-"));
+  const allowDatabasePath = path.join(allowDirectory, "allowlist.db");
+  const allowDatabase = new DatabaseSync(allowDatabasePath);
+  allowDatabase.exec(`
     CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, site_detail_url TEXT);
     CREATE TABLE cv_volume (
       id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT,
@@ -2049,35 +2049,75 @@ test("excludes blocked publishers from volume search and list (SRV-12)", async (
       image_url TEXT, site_detail_url TEXT
     );
   `);
-  blockDatabase.prepare("INSERT INTO cv_publisher VALUES (?, ?, ?)").run(31, "Top Cow", "https://example.test/top-cow");
-  blockDatabase.prepare("INSERT INTO cv_publisher VALUES (?, ?, ?)").run(42, "Dark Horse", "https://example.test/dark-horse");
-  blockDatabase.prepare("INSERT INTO cv_volume VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+  allowDatabase.prepare("INSERT INTO cv_publisher VALUES (?, ?, ?)").run(31, "Top Cow", "https://example.test/top-cow");
+  allowDatabase.prepare("INSERT INTO cv_publisher VALUES (?, ?, ?)").run(42, "Dark Horse", "https://example.test/dark-horse");
+  allowDatabase.prepare("INSERT INTO cv_volume VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run(7300, "Top Cow Book", null, "1995", 31, 5, null, null, "https://example.test/top-cow-book");
-  blockDatabase.prepare("INSERT INTO cv_volume VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+  allowDatabase.prepare("INSERT INTO cv_volume VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run(7301, "Dark Horse Book", null, "1996", 42, 3, null, null, "https://example.test/dark-horse-book");
-  blockDatabase.close();
+  allowDatabase.close();
 
-  const blockServer = createApiServer(blockDatabasePath, () => {}, { publisherBlocklist: [42] });
-  await new Promise((resolve) => blockServer.listen(0, "127.0.0.1", resolve));
-  const blockUrl = `http://127.0.0.1:${blockServer.address().port}`;
+  const allowServer = createApiServer(allowDatabasePath, () => {}, { publisherAllowlist: [42] });
+  await new Promise((resolve) => allowServer.listen(0, "127.0.0.1", resolve));
+  const allowUrl = `http://127.0.0.1:${allowServer.address().port}`;
 
   try {
-    // Search: the blocked publisher's volume is excluded; the unblocked one remains.
-    const search = await (await fetch(`${blockUrl}/api/search/?query=Book&resources=volume&limit=10`)).json();
+    // Search: only the allowlisted publisher's volume is included; the other is excluded.
+    const search = await (await fetch(`${allowUrl}/api/search/?query=Book&resources=volume&limit=10`)).json();
     const searchIds = search.results.map((result) => result.id);
-    assert.deepEqual(searchIds, [7300]);
+    assert.deepEqual(searchIds, [7301]);
     assert.equal(search.number_of_total_results, 1);
 
-    // List: same exclusion applies when no explicit publisher filter is present.
-    const list = await (await fetch(`${blockUrl}/api/volumes?limit=10&field_list=id`)).json();
-    assert.deepEqual(list.results.map((result) => result.id), [7300]);
+    // List: same inclusion applies when no explicit publisher filter is present.
+    const list = await (await fetch(`${allowUrl}/api/volumes?limit=10&field_list=id`)).json();
+    assert.deepEqual(list.results.map((result) => result.id), [7301]);
 
-    // An explicit publisher filter overrides the blocklist (both volumes return).
-    const filtered = await (await fetch(`${blockUrl}/api/volumes?filter=publisher_id:42&limit=10&field_list=id`)).json();
-    assert.deepEqual(filtered.results.map((result) => result.id), [7301]);
+    // An explicit publisher filter bypasses the allowlist (the non-allowlisted volume returns).
+    const filtered = await (await fetch(`${allowUrl}/api/volumes?filter=publisher_id:31&limit=10&field_list=id`)).json();
+    assert.deepEqual(filtered.results.map((result) => result.id), [7300]);
   } finally {
-    await new Promise((resolve) => blockServer.close(resolve));
-    rmSync(blockDirectory, { recursive: true, force: true });
+    await new Promise((resolve) => allowServer.close(resolve));
+    rmSync(allowDirectory, { recursive: true, force: true });
+  }
+});
+
+test("treats an empty publisher allowlist as no restriction (SRV-34)", async () => {
+  const emptyDirectory = mkdtempSync(path.join(os.tmpdir(), "comicvine-allowlist-empty-test-"));
+  const emptyDatabasePath = path.join(emptyDirectory, "allowlist.db");
+  const emptyDatabase = new DatabaseSync(emptyDatabasePath);
+  emptyDatabase.exec(`
+    CREATE TABLE cv_publisher (id INTEGER PRIMARY KEY, name TEXT, site_detail_url TEXT);
+    CREATE TABLE cv_volume (
+      id INTEGER PRIMARY KEY, name TEXT, aliases TEXT, start_year TEXT,
+      publisher_id INTEGER, count_of_issues INTEGER, description TEXT,
+      image_url TEXT, site_detail_url TEXT
+    );
+  `);
+  emptyDatabase.prepare("INSERT INTO cv_publisher VALUES (?, ?, ?)").run(31, "Top Cow", "https://example.test/top-cow");
+  emptyDatabase.prepare("INSERT INTO cv_publisher VALUES (?, ?, ?)").run(42, "Dark Horse", "https://example.test/dark-horse");
+  emptyDatabase.prepare("INSERT INTO cv_volume VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(7300, "Top Cow Book", null, "1995", 31, 5, null, null, "https://example.test/top-cow-book");
+  emptyDatabase.prepare("INSERT INTO cv_volume VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(7301, "Dark Horse Book", null, "1996", 42, 3, null, null, "https://example.test/dark-horse-book");
+  emptyDatabase.close();
+
+  // An explicitly empty allowlist must mean "no restriction" (a no-op), not
+  // "nothing allowed" — the footgun the SRV-34 safe default avoids.
+  const emptyServer = createApiServer(emptyDatabasePath, () => {}, { publisherAllowlist: [] });
+  await new Promise((resolve) => emptyServer.listen(0, "127.0.0.1", resolve));
+  const emptyUrl = `http://127.0.0.1:${emptyServer.address().port}`;
+
+  try {
+    // Both publishers' volumes return (search orders volumes start_year DESC).
+    const search = await (await fetch(`${emptyUrl}/api/search/?query=Book&resources=volume&limit=10`)).json();
+    assert.deepEqual(search.results.map((result) => result.id), [7301, 7300]);
+    assert.equal(search.number_of_total_results, 2);
+
+    const list = await (await fetch(`${emptyUrl}/api/volumes?limit=10&field_list=id`)).json();
+    assert.deepEqual(list.results.map((result) => result.id), [7300, 7301]);
+  } finally {
+    await new Promise((resolve) => emptyServer.close(resolve));
+    rmSync(emptyDirectory, { recursive: true, force: true });
   }
 });
 

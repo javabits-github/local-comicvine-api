@@ -28,9 +28,9 @@ Each completed request is logged to stdout as JSON with its method, path, query,
 
 Set `COMICVINE_VALIDATE=1` (or pass `createApiServer` a `validate: true` option) to have each **detail** request also fetch the same entity from the live ComicVine API and diff it against the bundled data, reporting the result in an extra `validation` field on the response. The live API key is read from `COMICVINE_API_KEY`; without a key the validator is skipped and responses are unchanged. The diff compares scalar fields (ignoring `date_added`, `date_last_updated`, URLs, images, and the `count_of_*` counters) and, for issues, the credit/relationship collections. `validation.status` is `match`, `mismatch`, `missing_on_live`, or `unavailable`; `validation.diffs` lists the differing fields. This consumes live API quota, so enable it only when checking data freshness.
 
-### Publisher blocklist (volume search and list)
+### Publisher allowlist (volume search and list)
 
-Set `COMICVINE_PUBLISHER_BLOCKLIST` to a comma-separated list of publisher ids (e.g. `5,9,42`) to exclude a publisher's volumes from the **volume** search and list results. Only volumes are affected — it is the only local resource with a `publisher_id` column, so it has no effect on issues, people, teams, or story arcs. The blocklist is a `publisher_id NOT IN (...)` predicate. On the list endpoint it does **not** override an explicit `?filter=publisher_id=…` or `?filter=publisher=…` request — an explicit publisher filter wins. It is also available as the `publisherBlocklist` option of `createApiServer` (an array of ids), which takes precedence over the environment variable.
+Set `COMICVINE_PUBLISHER_ALLOWLIST` to a comma-separated list of publisher ids (e.g. `5,9,42`) to include **only** those publishers' volumes in the **volume** search and list results. Only volumes are affected — it is the only local resource with a `publisher_id` column, so it has no effect on issues, people, teams, or story arcs. The allowlist is a `publisher_id IN (...)` predicate. An **empty** (or unset) allowlist means no restriction — every publisher's volumes are served, so existing deployments are unchanged until you populate it. On the list endpoint it does **not** override an explicit `?filter=publisher_id=…` or `?filter=publisher=…` request — an explicit publisher filter wins, so a client can still query a non-allowlisted publisher directly. It is also available as the `publisherAllowlist` option of `createApiServer` (an array of ids), which takes precedence over the environment variable.
 
 ### API key authentication
 
@@ -180,6 +180,12 @@ A running diary of decisions, gotchas, and experiments made while working on thi
 ```
 
 ### Diary
+
+#### 2026-11-16 — Publisher blocklist → allowlist (SRV-34)
+
+- **Context:** SRV-12 added a publisher **blocklist** (`COMICVINE_PUBLISHER_BLOCKLIST` / the `publisherBlocklist` option, a `publisher_id NOT IN (...)` predicate) that excludes a publisher's volumes from volume search and list. The motivating use case is better served by the inverse: include **only** the listed publishers' volumes.
+- **Change:** [src/server.js](src/server.js): the predicate is now `publisherAllowlistPredicate` — `publisher_id IN (...)` — driven by `COMICVINE_PUBLISHER_ALLOWLIST` (comma-separated) or the `publisherAllowlist` option (array of ids); "allowlist" naming follows SRV-14's CORS convention. **Key semantic decision:** an empty/absent allowlist means **no restriction** (a no-op until populated) rather than "nothing allowed" — the naive whitelist footgun (every volume disappears) is avoided, so existing deployments are unchanged. The list-endpoint bypass is kept: an explicit `?filter=publisher_id=`/`publisher=` term skips the allowlist for that request; on search (no `?filter`) it always applies when set. `parseIdList` still ignores non-numeric tokens. Updated the README "Publisher allowlist" section, [.env.example](.env.example), and the api-contract instructions; the SRV-12 test became two SRV-34 tests in [test/server.test.js](test/server.test.js) (allowlist restricts search + list with the explicit-filter bypass; empty allowlist = no-op). Full suite 136 = 134 pass + 0 fail + 2 skip.
+- **Gotcha / follow-up:** the rename is a breaking change for anyone who had set `COMICVINE_PUBLISHER_BLOCKLIST` or passed `publisherBlocklist` — the old names are gone (no deprecation alias), so a deployment using the blocklist must switch to `COMICVINE_PUBLISHER_ALLOWLIST` with the **inverse** list (the publishers to keep, not the ones to drop).
 
 #### 2026-11-15 — FTS search gate counts the base table, not the index (SRV-32)
 
