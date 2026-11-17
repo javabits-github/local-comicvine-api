@@ -16,7 +16,7 @@ It uses Node.js built-in HTTP and SQLite modules, so no npm dependencies are req
 ## Requirements
 
 - Node.js 26.13 or newer
-- The SQLite database in the project root, or a path supplied through `COMICVINE_DB_PATH`. The database is gitignored (multi-GB), so a fresh clone has none: run a sync to build one (see [Syncing Data](#syncing-data); requires a `COMICVINE_API_KEY`) or place an existing `localcv.db` in the project root.
+- The SQLite database in the project root, or a path supplied through `COMICVINE_DB_PATH`. The database is gitignored (multi-GB), so a fresh clone has none: run a sync to build one (see [Syncing Data](#syncing-data); requires a `COMICVINE_API_KEY`) or place an existing `localcv.db` in the project root. Note: on a fresh database the four legacy tables (`cv_publisher`/`cv_volume`/`cv_issue`/`cv_person`) are not created by `migrate.js` (DB-3 in `TODO.md`), so a fresh sync skips those endpoints and the corresponding resources return 404 — placing an existing `localcv.db` is the reliable way to get all eleven.
 
 ## Run
 
@@ -48,7 +48,7 @@ CORS is **permissive by default** so browser-based clients work out of the box: 
 
 ### Gzip compression
 
-Response compression is **off by default** — every response is sent uncompressed, which suits local use. To enable it, set COMICVINE_COMPRESS=1 (or pass createApiServer a compress: true option). When enabled, a response body is gzipped only if the client sends Accept-Encoding: gzip (with a non-zero quality) **and** the serialized body is at least compressMinSize bytes (default 1024, settable via COMICVINE_COMPRESS_MIN_SIZE or the compressMinSize option — gzip’s fixed overhead makes tiny bodies *larger*, so they stay uncompressed). Compressed responses carry Content-Encoding: gzip and Vary: Accept-Encoding; everything else is byte-identical to the uncompressed path. JSON, XML, and JSONP responses are all eligible. The SRV-16 esponse_body log capture records the **pre-compression** body, so logs stay readable even when the wire bytes are compressed.
+Response compression is **off by default** — every response is sent uncompressed, which suits local use. To enable it, set `COMICVINE_COMPRESS=1` (or pass `createApiServer` a `compress: true` option). When enabled, a response body is gzipped only if the client sends `Accept-Encoding: gzip` (with a non-zero quality) **and** the serialized body is at least `compressMinSize` bytes (default 1024, settable via `COMICVINE_COMPRESS_MIN_SIZE` or the `compressMinSize` option — gzip’s fixed overhead makes tiny bodies *larger*, so they stay uncompressed). Compressed responses carry `Content-Encoding: gzip` and `Vary: Accept-Encoding`; everything else is byte-identical to the uncompressed path. JSON, XML, and JSONP responses are all eligible. The SRV-16 `response_body` log capture records the **pre-compression** body, so logs stay readable even when the wire bytes are compressed.
 
 ### Sorting (list endpoints)
 
@@ -58,7 +58,7 @@ With no `?sort=`, a list endpoint uses a **default sort column** — `id ASC` by
 
 ## Endpoints
 
-The configured `localcv.db` provides volumes, issues, publishers, people, teams, story arcs, concepts, characters, locations, objects, and powers. These endpoints use the ComicVine response envelope; all of them support field selection, sorting, filters, and JSON, XML, or JSONP formats. Issue list and detail responses also honor `field_list`, omitting unrequested fields such as the credit arrays; unrecognized field names are ignored. An issue's `volume` object includes `id`, `name`, `api_detail_url`, and `site_detail_url`; `api_detail_url` is derived from the volume ID when it is not stored in the database. Issue filters on `volume` or `volume_id` compare exact IDs and accept either a number or ComicVine ID such as `4050-7300`; a pipe-separated list of such ids (`?filter=volume:7300|73001`) matches any of them via `IN (…)` (the live API ORs the tokens), while a single value stays an exact match. Each resource reads its normalized columns directly from the database; credit arrays and relationship objects are stored as JSON text and parsed on demand, so no raw API payload is stored in `localcv.db`. Resources whose tables are absent return 404.
+The configured `localcv.db` provides volumes, issues, publishers, people, teams, story arcs, concepts, characters, locations, objects, and powers. These endpoints use the ComicVine response envelope; list endpoints support field selection, sorting, and filters, detail endpoints support field selection, and all of them support JSON, XML, or JSONP formats. Issue list and detail responses also honor `field_list`, omitting unrequested fields such as the credit arrays; unrecognized field names are ignored. An issue's `volume` object includes `id`, `name`, `api_detail_url`, and `site_detail_url`; `api_detail_url` is derived from the volume ID when it is not stored in the database. Issue filters on `volume` or `volume_id` compare exact IDs and accept either a number or ComicVine ID such as `4050-7300`; a pipe-separated list of such ids (`?filter=volume:7300|73001`) matches any of them via `IN (…)` (the live API ORs the tokens), while a single value stays an exact match. Each resource reads its normalized columns directly from the database; relationship collections live in `cv_*_credit` join tables for the eight normalized resources (and as JSON text for the three remaining — character, location, power) and are resolved on demand, so no raw API payload is stored in `localcv.db`. Resources whose tables are absent return 404.
 
 ```text
 GET /api/issues/?limit=10&offset=0
@@ -87,7 +87,7 @@ Person details are available at `/api/person/{id}`. Their `field_list` also supp
 
 Publisher details are available at `/api/publisher/{id}`. Their `field_list` also supports `characters`, `story_arcs`, `teams`, and `volumes`.
 
-Search accepts comma-separated `resources`, matches query text against names only, and supports `field_list` projection. It returns `resource_type` with each hit and supports JSON, XML, and JSONP. Its default limit is 10 and maximum is 100. Resources without a table in `localcv.db` return no search results. `api_key` is ignored by the mock. `subscriber_only` is accepted for API compatibility but is **unsupported**: the bundled data has no subscriber flag to filter on, so the parameter is parsed and then ignored — every value (`true`/`false`) returns the same unfiltered results. Responses use ComicVine's `error`, `limit`, `offset`, result-count, `status_code`, and `results` fields.
+Search accepts comma-separated `resources`, matches query text against names only, and supports `field_list` projection. It returns `resource_type` with each hit and supports JSON, XML, and JSONP. Its default limit is 10 and maximum is 100. Resources without a table in `localcv.db` return no search results. `api_key` is ignored unless key authentication is enabled (see [API key authentication](#api-key-authentication)). `subscriber_only` is accepted for API compatibility but is **unsupported**: the bundled data has no subscriber flag to filter on, so the parameter is parsed and then ignored — every value (`true`/`false`) returns the same unfiltered results. Responses use ComicVine's `error`, `limit`, `offset`, result-count, `status_code`, and `results` fields.
 
 ## Syncing Data
 
@@ -115,13 +115,13 @@ Each name may be the endpoint name (`issues`), the `cv_*` table name (`cv_issue`
 
 An incremental sync fetches only entities whose `date_last_updated` falls in a window ending today, starting one day before `cv_sync_metadata.last_sync_date` (the overlap keeps an update committed on the last sync day from being missed). When no `last_sync_date` is recorded for an endpoint (a first sync on a database that predates it, or a lost/corrupted row), the updater baselines on the data itself: the newest `date_last_updated` stored in that endpoint's table, minus one day — an arbitrary window (the old 30-day fallback) would silently miss every entity updated before it. If the table is empty, no window can populate it, so that endpoint runs a **full sync** (no date filter) for that run, announced in the log; if the table does not exist at all (a fresh database — the four legacy tables are Python-updater heritage and are not created by `migrate.js`), the endpoint is skipped with an error rather than burning API calls into "no such table" failures.
 
-A full sync is expensive (one unfiltered call per page across all eleven endpoints ≈ ~1.1M issue-detail calls; at the 200-calls/hour rate limit it runs for weeks and cannot be parallelized), so it is gated behind a confirmation. In an interactive run the updater prints a warning and asks you to type `yes`; in a non-interactive run it aborts unless you confirm explicitly:
+A full sync is expensive (one unfiltered list call per page plus one detail call per entity across all eleven endpoints — ≈1.1M issue-detail calls; at the 200-calls/hour rate limit it runs for months, roughly 5,500 hours, and cannot be parallelized), so it is gated behind a confirmation. In an interactive run the updater prints a warning and asks you to type `yes`; in a non-interactive run it aborts unless you confirm explicitly:
 
 ```powershell
 npm sync:full -- --yes   # confirm the full sync without an interactive prompt
 ```
 
-`npm sync` runs the updater with `--env-file-if-exists=.env`, so `COMICVINE_API_KEY` is read from `.env` (or the `--api-key` flag, or the `COMICVINE_API_KEY` environment variable). The updater opens the database in WAL mode, upserts each resource into its `cv_*` table (all bound values go through a JSON serializer), and advances `cv_sync_metadata.last_sync_date` only for endpoints that succeed. It reuses the server's `field_list` projection and the live API's retry contract (107 → escalating backoff, 100 → abort, 420 → wait). The original Python updater's email report and GUI database picker (`smtplib`/`tkinter`) have no zero-dependency Node equivalent and are not implemented. The full flag reference lives in the updater's `--help` output and its header comment.
+`npm sync` runs the updater with `--env-file-if-exists=.env`, so `COMICVINE_API_KEY` is read from `.env` (or the `--api-key` flag, or the `COMICVINE_API_KEY` environment variable). The updater opens the database in WAL mode, upserts each resource into its `cv_*` table (all bound values go through a JSON serializer), and advances `cv_sync_metadata.last_sync_date` only for endpoints that succeed. It reuses the server's `field_list` projection and the live API's retry contract (107 → escalating backoff, 100 → endpoint skipped, 420 → wait). The original Python updater's email report and GUI database picker (`smtplib`/`tkinter`) have no zero-dependency Node equivalent and are not implemented. The full flag reference lives in the updater's `--help` output and its header comment.
 
 ## Raw API sync
 
@@ -163,7 +163,7 @@ docker compose run sync       # incremental sync (requires COMICVINE_API_KEY)
 docker compose run sync-full  # one-time full refresh
 ```
 
-[.dockerignore](.dockerignore) keeps the image to the source and `package.json` only (no databases, `.env`, the legacy Python updater, docs, or VCS files). [docker-compose.yml](docker-compose.yml) mounts `./data` at `/data` for the `server` service and defines `sync` / `sync-full` services under the `tools` profile. Put an existing `localcv.db` in `./data` (or run a sync to build one) before starting the server.
+[.dockerignore](.dockerignore) keeps the image to the source and `package.json` only (no databases, `.env`, `node_modules`, docs, `LICENSE`, `TODO.md`, or VCS files). [docker-compose.yml](docker-compose.yml) mounts `./data` at `/data` for the `server` service and defines `sync` / `sync-full` services under the `tools` profile. Put an existing `localcv.db` in `./data` (or run a sync to build one) before starting the server.
 
 ## Test
 
