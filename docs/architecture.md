@@ -19,8 +19,7 @@ flowchart TB
 
     LE --> CFG[buildResourceConfig<br/>subquery + JOINs]
     DE --> CFG
-    CFG --> Q
-    Q --> F["parseFilters<br/>LIKE/FTS text, volume id (incl. multi-id), ranges"]
+    CFG --> F["parseFilters<br/>LIKE/FTS text, volume id (incl. multi-id), ranges"]
     F --> SO[parseSort — all list endpoints<br/>per-resource allowlist, default id ASC]
     SO --> L[resolveLimit<br/>list 100 / search 10 / max 100<br/>searchForcedLimit = search only]
     L --> Q
