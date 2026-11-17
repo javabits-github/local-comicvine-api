@@ -14,18 +14,18 @@ flowchart TB
 
     SE --> LO[loop selected resources]
     LO --> Q[(localcv.db<br/>node:sqlite)]
-    Q -->|name LIKE %query%<br/>volume: start_year DESC<br/>issue: issue_number ASC| LO
+    Q -->|"name: FTS trigram / LIKE fallback<br/>volume: start_year DESC<br/>issue: issue_number ASC"| LO
     LO --> CAT[concatenate results<br/>slice to one page]
 
     LE --> CFG[buildResourceConfig<br/>subquery + JOINs]
     DE --> CFG
     CFG --> Q
-    Q --> F[parseFilters<br/>LIKE partial, exact volume id, ranges]
-    F --> SO[parseSort — volume only<br/>else id ASC]
+    Q --> F["parseFilters<br/>LIKE/FTS text, volume id (incl. multi-id), ranges"]
+    F --> SO[parseSort — all list endpoints<br/>per-resource allowlist, default id ASC]
     SO --> L[resolveLimit<br/>list 100 / search 10 / max 100<br/>searchForcedLimit = search only]
     L --> Q
 
-    Q --> B[buildResult<br/>parseJsonColumn / parseCredits]
+    Q --> B["buildResult<br/>join tables (8) / JSON columns (3)"]
     B --> FL[field_list projection]
     FL --> EN[comicVine envelope<br/>error, limit, offset, counts, status_code, results]
     CAT --> EN
@@ -267,17 +267,17 @@ erDiagram
     cv_location }o--o| cv_issue : first_appeared_in_issue_id
     cv_object }o--o| cv_issue : first_appeared_in_issue_id
 
-    cv_publisher ||--o{ cv_publisher_credit
-    cv_volume ||--o{ cv_volume_credit
-    cv_volume ||--o{ cv_volume_issue_ref
-    cv_issue ||--o{ cv_volume_issue_ref : "first/last issue"
-    cv_issue ||--o{ cv_issue_credit
-    cv_issue ||--o{ cv_issue_image
-    cv_person ||--o{ cv_person_credit
-    cv_team ||--o{ cv_team_credit
-    cv_storyarc ||--o{ cv_storyarc_credit
-    cv_concept ||--o{ cv_concept_credit
-    cv_object ||--o{ cv_object_credit
+    cv_publisher ||--o{ cv_publisher_credit : credits
+    cv_volume ||--o{ cv_volume_credit : credits
+    cv_volume ||--o{ cv_volume_issue_ref : issue_refs
+    cv_issue ||--o{ cv_volume_issue_ref : first_last
+    cv_issue ||--o{ cv_issue_credit : credits
+    cv_issue ||--o{ cv_issue_image : images
+    cv_person ||--o{ cv_person_credit : credits
+    cv_team ||--o{ cv_team_credit : credits
+    cv_storyarc ||--o{ cv_storyarc_credit : credits
+    cv_concept ||--o{ cv_concept_credit : credits
+    cv_object ||--o{ cv_object_credit : credits
 
     cv_character }o..o{ cv_team : teams
     cv_character }o..o{ cv_power : powers
@@ -301,7 +301,7 @@ Notes on the schema:
 ## Notes
 
 - **Server** is a single file, zero npm deps: `node:http` + `node:sqlite`. Every **list** endpoint honors `?sort=` (SRV-1); only `search` honors `COMICVINE_FORCED_LIMIT`.
-- **Search** matches `name LIKE %query%` per selected resource (volumes newest-first, issues by numeric issue number), concatenates the hits in resource order, then slices one page — so `number_of_total_results` is the combined count across resources.
+- **Search** matches each selected resource on its `name` column: an FTS5 trigram `MATCH` when the resource's `cv_*_fts` index is populated (gated on the FTS `_data` shadow table, SRV-32; queries ≥ 3 chars), else a case-insensitive `LIKE` (SRV-5). Volumes come newest-first, issues by numeric issue number; the hits are concatenated in resource order and sliced to one page, so `number_of_total_results` is the combined count across resources.
 - **Updater** is incremental by default (`date_last_updated` filter since last safe sync date); `--full` drops the filter but is gated behind a `yes` confirmation (UPD-2). `validateApiKey` runs once at startup — a `100` there aborts the whole run (`exit 1`); a `100`/exhausted-`107` *mid-run* just makes `apiCall` return `null` and that endpoint is skipped. Skipped endpoints don't advance `cv_sync_metadata`, so the next run re-syncs from the old start date.
 - **Rawapi** (RAW-1) is a third process ([src/rawapi.js](../src/rawapi.js)) that keeps `comicvine_rawapi_*.db` in step with the live API: for every entity changed since the last sync it stores the **verbatim** `results` JSON in the uniform `cv_*` tables (`id`, `date_last_updated`, `site_detail_url`, `raw_api_response`). Resources sync smallest-first so `cv_issue` is always last; a list call that still fails after retries skips that table and the sync continues. It updates the database in place (no dated-copy mechanism) and reuses the updater's `cv_sync_metadata` resume tracking.
 - The three still-JSON tables (character, location, power) store their relationship collections as JSON text; the server parses them in JS, never in SQL. The other eight tables' relationships live in join tables and are resolved in SQL.
